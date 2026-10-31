@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0c1010">
-    <meta name="description" content="Live Binance USD-M Futures scanner for large bullish one-minute candles.">
+    <meta name="description" content="Binance USD-M Futures candle alerts and optional automated trading.">
     <title>Wickwatch - Futures scanner</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,7 +39,7 @@
             <span class="exchange-divider"></span>
             <span class="exchange-market">USD-M</span>
           </div>
-          <p>Market data is provided by Binance Futures. This app does not place trades.</p>
+          <p>Trading is optional. Start with Binance Demo and verify every order.</p>
         </div>
       </aside>
 
@@ -59,13 +59,17 @@
             <div>
               <div class="eyebrow"><span class="eyebrow-line"></span> MARKET SCANNER</div>
               <h1 id="page-title">Candle alerts<span class="heading-period">.</span></h1>
-              <p class="page-description">Bullish one-minute candles with an unusually wide range.</p>
+              <p class="page-description">Large one-minute moves across Binance USD-M perpetuals.</p>
             </div>
-            <div class="heading-meta">
-              <span class="live-pulse"></span>
-              <span>LIVE FEED</span>
-              <span class="meta-separator">/</span>
-              <span id="last-updated">Waiting for market data</span>
+            <div class="overview-heading-actions">
+              <button class="trade-session-button" id="trading-session-button" type="button" disabled>START TRADING</button>
+              <span class="trade-session-status" id="trading-session-status" role="status">TRADING STOPPED</span>
+              <div class="heading-meta">
+                <span class="live-pulse"></span>
+                <span>LIVE FEED</span>
+                <span class="meta-separator">/</span>
+                <span id="last-updated">Waiting for market data</span>
+              </div>
             </div>
           </div>
 
@@ -93,7 +97,7 @@
             <div class="panel-heading">
               <div>
                 <div class="panel-title-row"><span class="panel-live-mark"></span><h2 id="alerts-title">Latest alerts</h2><span class="count-pill" id="count-pill">0</span></div>
-                <p class="panel-subtitle">Closed green candles that meet your open-to-close move threshold</p>
+                <p class="panel-subtitle">Closed candles that meet your open-to-close move threshold</p>
               </div>
               <div class="panel-actions">
                 <button class="export-button" id="export-button" type="button" disabled>
@@ -117,6 +121,7 @@
                     <th scope="col">1M VOLUME (USDT)</th>
                     <th scope="col">BIAS</th>
                     <th scope="col">CLOSED AT</th>
+                    <th scope="col">CLOSE</th>
                   </tr>
                 </thead>
                 <tbody id="alerts-body"></tbody>
@@ -126,7 +131,7 @@
                   <span class="empty-line"></span><span class="empty-candle"><i></i></span><span class="empty-line"></span>
                 </div>
                 <strong id="empty-title">Scanning the market</strong>
-                <p id="empty-description">Alerts will appear here when a one-minute candle closes green and clears your threshold.</p>
+                <p id="empty-description">Alerts will appear here when a one-minute candle moves up or down beyond your threshold.</p>
                 <span class="empty-foot"><span></span> WATCHING ALL ACTIVE PERPETUALS</span>
               </div>
             </div>
@@ -138,7 +143,7 @@
 
           <footer class="page-footer">
             <span>WICKWATCH <span class="footer-dot">/</span> BINANCE USD-M FUTURES</span>
-            <span>For informational purposes only</span>
+            <span>Demo mode recommended. Trading involves risk.</span>
           </footer>
         </section>
 
@@ -159,14 +164,14 @@
             <div class="setting-row range-setting">
               <div class="setting-copy">
                 <label for="threshold-input">Minimum candle move</label>
-                <p>Measured from the candle open to its close. Only closed green candles trigger an alert.</p>
+                <p>Measured from the candle open to its close. Upward and downward moves can trigger alerts.</p>
               </div>
               <div class="threshold-control">
                 <input id="threshold-input" name="threshold" type="number" min="0.1" max="100" step="0.1" value="5" required>
                 <span>%</span>
               </div>
             </div>
-            <div class="setting-note"><span class="note-icon">i</span><span>For example, a 5% move means the candle closes at least 5% above its open.</span></div>
+            <div class="setting-note"><span class="note-icon">i</span><span>A 5% threshold can trigger on a candle closing at least 5% above or below its open.</span></div>
 
             <div class="setting-row alert-limit-setting">
               <div class="setting-copy">
@@ -191,6 +196,76 @@
               </label>
             </div>
 
+            <div class="settings-card-heading trading-heading">
+              <div class="settings-symbol range-symbol" aria-hidden="true"><span></span><i></i><b></b></div>
+              <div><h2>Binance Futures trading</h2><p>Orders use 5x leverage. Saving settings never starts trading; press Start Trading on Overview when you're ready.</p></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label for="trade-direction-input">Trade direction</label>
+                <p>Choose whether to follow both signal directions or trade only one side.</p>
+              </div>
+              <select id="trade-direction-input" name="tradeDirection" class="settings-select">
+                <option value="both">Long up / short down</option>
+                <option value="long">Long signals only</option>
+                <option value="short">Short signals only</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label for="margin-amount-input">Margin per trade</label>
+                <p>Position notional is this margin multiplied by 5x leverage. Percent uses available USDT margin.</p>
+              </div>
+              <div class="margin-control">
+                <input id="margin-amount-input" name="marginAmount" type="number" min="0.01" step="0.01" placeholder="Required to trade">
+                <select id="margin-unit-input" name="marginUnit" aria-label="Margin amount unit">
+                  <option value="percent">% available</option>
+                  <option value="usdt">USDT</option>
+                </select>
+              </div>
+            </div>
+            <div class="setting-row max-open-trades-setting">
+              <div class="setting-copy">
+                <label for="max-open-trades-input">Maximum open trades</label>
+                <p>Stop new entries when this many Binance Futures positions are open. Existing positions, including ones opened outside Wickwatch, count toward the limit.</p>
+              </div>
+              <div class="threshold-control">
+                <input id="max-open-trades-input" name="maxOpenTrades" type="number" min="1" max="100" step="1" value="5" required>
+                <span>trades</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label for="trade-mode-input">Binance environment</label>
+                <p>Demo is separate from your live account. Changing environment requires entering its API credentials again.</p>
+              </div>
+              <select id="trade-mode-input" name="tradeMode" class="settings-select">
+                <option value="demo">Demo trading (recommended)</option>
+                <option value="live">Live trading (real funds)</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label>Trading session</label>
+                <p id="trading-settings-state">Trading is stopped. Opening or reloading the dashboard always stops automatic trading.</p>
+              </div>
+              <span class="session-state-pill" id="trading-settings-status">STOPPED</span>
+            </div>
+            <div class="credentials-block">
+              <div class="setting-copy">
+                <label for="api-key-input">Binance API key</label>
+                <p>Use a Futures-enabled key. Withdrawals are not needed. Credentials stay in this local server's memory only.</p>
+              </div>
+              <input id="api-key-input" name="apiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter API key">
+              <div class="setting-copy credentials-secret-copy">
+                <label for="api-secret-input">Binance API secret</label>
+              </div>
+              <input id="api-secret-input" name="apiSecret" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter API secret">
+              <div class="credential-status" id="credential-status" role="status">Checking local trading service...</div>
+              <button class="text-button remove-credentials" id="remove-credentials-button" type="button" hidden>Remove saved credentials</button>
+            </div>
+            <div class="setting-note trading-note"><span class="note-icon">i</span><span>API credentials are masked and never saved in browser storage. They are held in memory by the local server and cleared when it stops. Live mode can place real orders.</span></div>
+
             <div class="settings-card-footer">
               <span id="settings-feedback" role="status"></span>
               <button class="save-button" type="submit">Save settings <span aria-hidden="true">&rarr;</span></button>
@@ -199,11 +274,11 @@
 
           <section class="about-card">
             <div class="about-icon" aria-hidden="true">i</div>
-            <div><strong>Market coverage</strong><p>All active Binance USD-M USDT perpetual contracts, streamed on the 1-minute interval. Your settings and alert history are saved in this browser.</p></div>
+            <div><strong>Market coverage</strong><p>All active Binance USD-M USDT perpetual contracts, streamed on the 1-minute interval. Scanner preferences and alert history are saved in this browser; trading requires the local server.</p></div>
           </section>
           <footer class="page-footer">
             <span>WICKWATCH <span class="footer-dot">/</span> BINANCE USD-M FUTURES</span>
-            <span>For informational purposes only</span>
+            <span>Demo mode recommended. Trading involves risk.</span>
           </footer>
         </section>
       </main>

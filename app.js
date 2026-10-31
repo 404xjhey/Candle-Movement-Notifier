@@ -4,6 +4,8 @@ const SETTINGS_KEY = "wickwatch-settings-v1";
 const RECORDS_KEY = "wickwatch-alerts-v2";
 const DEFAULT_ALERT_LIMIT = 20;
 const MAX_ALERT_LIMIT = 500;
+const DEFAULT_MAX_OPEN_TRADES = 5;
+const MAX_OPEN_TRADES = 100;
 const SUBSCRIPTION_BATCH_SIZE = 100;
 const SUBSCRIPTION_INTERVAL_MS = 250;
 
@@ -26,7 +28,20 @@ const elements = {
   settingsForm: document.querySelector("#settings-form"),
   thresholdInput: document.querySelector("#threshold-input"),
   alertLimitInput: document.querySelector("#alert-limit-input"),
+  maxOpenTradesInput: document.querySelector("#max-open-trades-input"),
   notificationsInput: document.querySelector("#notifications-input"),
+  tradeDirectionInput: document.querySelector("#trade-direction-input"),
+  marginAmountInput: document.querySelector("#margin-amount-input"),
+  marginUnitInput: document.querySelector("#margin-unit-input"),
+  tradeModeInput: document.querySelector("#trade-mode-input"),
+  tradingSessionButton: document.querySelector("#trading-session-button"),
+  tradingSessionStatus: document.querySelector("#trading-session-status"),
+  tradingSettingsStatus: document.querySelector("#trading-settings-status"),
+  tradingSettingsState: document.querySelector("#trading-settings-state"),
+  apiKeyInput: document.querySelector("#api-key-input"),
+  apiSecretInput: document.querySelector("#api-secret-input"),
+  credentialStatus: document.querySelector("#credential-status"),
+  removeCredentialsButton: document.querySelector("#remove-credentials-button"),
   settingsFeedback: document.querySelector("#settings-feedback"),
   toast: document.querySelector("#toast"),
   breadcrumb: document.querySelector("#breadcrumb-current"),
@@ -37,6 +52,12 @@ const elements = {
 let settings = loadSettings();
 let alerts = loadAlerts();
 let markets = [];
+let tradingStatus = null;
+let tradingServiceAvailable = false;
+let tradingSessionBusy = false;
+let positions = new Map();
+let openPositionCount = 0;
+const closingSymbols = new Set();
 const tickerChanges = new Map();
 const tickerPrices = new Map();
 let socket;
@@ -52,16 +73,37 @@ function loadSettings() {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
     const threshold = Number(saved.threshold);
     const alertLimit = Number(saved.alertLimit);
+    const maxOpenTrades = Number(saved.maxOpenTrades);
     return {
       threshold: Number.isFinite(threshold) && threshold >= 0.1 && threshold <= 100 ? threshold : 5,
       alertLimit: Number.isInteger(alertLimit) && alertLimit >= 1 && alertLimit <= MAX_ALERT_LIMIT
         ? alertLimit
         : DEFAULT_ALERT_LIMIT,
-      notifications: saved.notifications === true
+      maxOpenTrades: Number.isInteger(maxOpenTrades) && maxOpenTrades >= 1 && maxOpenTrades <= MAX_OPEN_TRADES
+        ? maxOpenTrades
+        : DEFAULT_MAX_OPEN_TRADES,
+      notifications: saved.notifications === true,
+      tradeMode: saved.tradeMode === "live" ? "live" : "demo",
+      tradeDirection: ["both", "long", "short"].includes(saved.tradeDirection) ? saved.tradeDirection : "both",
+      marginAmount: Number.isFinite(Number(saved.marginAmount)) && Number(saved.marginAmount) > 0
+        ? Number(saved.marginAmount)
+        : "",
+      marginUnit: saved.marginUnit === "usdt" ? "usdt" : "percent",
+      tradingEnabled: false
     };
   } catch (error) {
     console.warn("Could not read Wickwatch settings from local storage.", error);
-    return { threshold: 5, alertLimit: DEFAULT_ALERT_LIMIT, notifications: false };
+    return {
+      threshold: 5,
+      alertLimit: DEFAULT_ALERT_LIMIT,
+      maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
+      notifications: false,
+      tradeMode: "demo",
+      tradeDirection: "both",
+      marginAmount: "",
+      marginUnit: "percent",
+      tradingEnabled: false
+    };
   }
 }
 
@@ -81,7 +123,9 @@ function loadAlerts() {
       Number.isFinite(alert.closeTime)
     ).map((alert) => ({
       ...alert,
-      changePercent: Number.isFinite(alert.changePercent) ? alert.changePercent : null
+      changePercent: Number.isFinite(alert.changePercent) ? alert.changePercent : null,
+      direction: alert.direction === "SHORT" ? "SHORT" : "LONG",
+      tradeStatus: typeof alert.tradeStatus === "string" ? alert.tradeStatus : "not-traded"
     }));
     const seenSymbols = new Set();
     return validAlerts
@@ -145,7 +189,37 @@ function renderSettings() {
   elements.thresholdDisplay.innerHTML = `${settings.threshold.toFixed(1)}<span class="stat-unit">%</span>`;
   elements.thresholdInput.value = String(settings.threshold);
   elements.alertLimitInput.value = String(settings.alertLimit);
+  elements.maxOpenTradesInput.value = String(settings.maxOpenTrades);
   elements.notificationsInput.checked = settings.notifications;
+  elements.tradeDirectionInput.value = settings.tradeDirection;
+  elements.marginAmountInput.value = settings.marginAmount === "" ? "" : String(settings.marginAmount);
+  elements.marginUnitInput.value = settings.marginUnit;
+  elements.tradeModeInput.value = settings.tradeMode;
+  renderTradingSession();
+}
+
+function renderTradingSession() {
+  const active = tradingStatus?.enabled === true;
+  const canStart = tradingServiceAvailable && tradingStatus?.configured === true &&
+    Number(tradingStatus.marginAmount ?? settings.marginAmount) > 0;
+  elements.tradingSessionButton.disabled = tradingSessionBusy || (!active && !canStart);
+  elements.tradingSessionButton.textContent = tradingSessionBusy
+    ? "PLEASE WAIT..."
+    : active
+      ? "STOP TRADING"
+      : "START TRADING";
+  elements.tradingSessionButton.classList.toggle("stop-session", active);
+  elements.tradingSessionStatus.textContent = active
+    ? `TRADING ACTIVE - ${tradingStatus.mode.toUpperCase()} - ${openPositionCount}/${tradingStatus.maxOpenTrades} OPEN`
+    : tradingServiceAvailable
+      ? "TRADING STOPPED"
+      : "LOCAL TRADING SERVER OFFLINE";
+  elements.tradingSessionStatus.classList.toggle("session-active", active);
+  elements.tradingSettingsStatus.textContent = active ? "ACTIVE" : "STOPPED";
+  elements.tradingSettingsStatus.classList.toggle("session-active", active);
+  elements.tradingSettingsState.textContent = active
+    ? "Automatic trading is active. Use Stop Trading on Overview to pause new entries."
+    : "Trading is stopped. Opening or reloading the dashboard always stops automatic trading.";
 }
 
 function formatPrice(value) {
@@ -172,7 +246,7 @@ function formatChangePercent(value) {
 function getPnlPercent(alert) {
   const currentPrice = tickerPrices.get(alert.symbol);
   return Number.isFinite(currentPrice)
-    ? ((currentPrice - alert.close) / alert.close) * 100
+    ? ((currentPrice - alert.close) / alert.close) * 100 * (alert.direction === "SHORT" ? -1 : 1)
     : null;
 }
 
@@ -210,10 +284,11 @@ function renderAlerts() {
     row.append(contractCell);
 
     const rangeCell = addCell(row, "range-value", `${alert.movePercent.toFixed(2)}%`);
+    rangeCell.classList.toggle("negative", alert.movePercent < 0);
     const rangeTrack = document.createElement("span");
     const rangeFill = document.createElement("span");
     rangeTrack.className = "range-track";
-    rangeFill.style.width = `${Math.min((alert.movePercent / Math.max(settings.threshold * 2, 1)) * 100, 100)}%`;
+    rangeFill.style.width = `${Math.min((Math.abs(alert.movePercent) / Math.max(settings.threshold * 2, 1)) * 100, 100)}%`;
     rangeTrack.append(rangeFill);
     rangeCell.append(rangeTrack);
 
@@ -230,11 +305,37 @@ function renderAlerts() {
     const biasCell = document.createElement("td");
     const bias = document.createElement("span");
     bias.className = "bias-pill";
-    bias.textContent = "BULLISH";
+    const isShortSignal = alert.direction === "SHORT";
+    bias.classList.toggle("short-bias", isShortSignal);
+    bias.textContent = isShortSignal ? "BEARISH" : "BULLISH";
     biasCell.append(bias);
     row.append(biasCell);
 
     addCell(row, "closed-time", formatCloseTime(alert.closeTime));
+    const closeCell = document.createElement("td");
+    closeCell.className = "trade-cell";
+    const position = positions.get(alert.symbol);
+    if (position) {
+      const closeButton = document.createElement("button");
+      closeButton.className = "close-trade-button";
+      closeButton.type = "button";
+      closeButton.textContent = "CLOSE";
+      closeButton.disabled = closingSymbols.has(alert.symbol) || !tradingServiceAvailable;
+      closeButton.setAttribute("aria-label", `Close ${position.direction.toLowerCase()} position for ${alert.symbol}`);
+      closeButton.addEventListener("click", () => closeTrade(alert.symbol));
+      closeCell.append(closeButton);
+      const positionLabel = document.createElement("span");
+      positionLabel.className = "trade-status";
+      positionLabel.textContent = `${position.direction} ${formatPrice(position.amount)}`;
+      closeCell.append(positionLabel);
+    } else {
+      const tradeStatus = document.createElement("span");
+      tradeStatus.className = `trade-status trade-status-${alert.tradeStatus}`;
+      tradeStatus.textContent = getTradeStatusLabel(alert.tradeStatus);
+      if (alert.tradeError) tradeStatus.title = alert.tradeError;
+      closeCell.append(tradeStatus);
+    }
+    row.append(closeCell);
     elements.alertsBody.append(row);
   }
 
@@ -269,7 +370,7 @@ function handleTickers(tickers) {
 }
 
 function exportAlerts() {
-  const headers = ["Contract", "Candle Move", "24h Change", "Close Price", "PnL %", "1m Volume (USDT)", "Bias", "Closed At"];
+  const headers = ["Contract", "Candle Move", "24h Change", "Close Price", "PnL %", "1m Volume (USDT)", "Bias", "Closed At", "Trade Status"];
   const rows = alerts.map((alert) => [
     alert.symbol,
     `${alert.movePercent.toFixed(2)}%`,
@@ -277,8 +378,9 @@ function exportAlerts() {
     String(alert.close),
     formatChangePercent(getPnlPercent(alert)),
     String(alert.quoteVolume),
-    "Bullish",
-    new Date(alert.closeTime).toISOString()
+    alert.direction === "SHORT" ? "Bearish" : "Bullish",
+    new Date(alert.closeTime).toISOString(),
+    alert.tradeStatus
   ]);
   const csv = [headers, ...rows]
     .map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(","))
@@ -295,7 +397,7 @@ function exportAlerts() {
 function notify(alert) {
   if (!settings.notifications || !("Notification" in window) || Notification.permission !== "granted") return;
   new Notification(`${alert.symbol} candle alert`, {
-    body: `Bullish ${alert.movePercent.toFixed(2)}% move | Close ${formatPrice(alert.close)} | ${formatVolume(alert.quoteVolume)} volume`
+    body: `${alert.direction === "SHORT" ? "Bearish" : "Bullish"} ${Math.abs(alert.movePercent).toFixed(2)}% move | Close ${formatPrice(alert.close)} | ${formatVolume(alert.quoteVolume)} volume`
   });
 }
 
@@ -306,10 +408,10 @@ function handleKline(message) {
   const open = Number(candle.o);
   const close = Number(candle.c);
   const quoteVolume = Number(candle.q);
-  if (![open, close, quoteVolume].every(Number.isFinite) || open <= 0 || close <= open) return;
+  if (![open, close, quoteVolume].every(Number.isFinite) || open <= 0 || close === open) return;
 
   const movePercent = ((close - open) / open) * 100;
-  if (movePercent <= settings.threshold) return;
+  if (Math.abs(movePercent) <= settings.threshold) return;
   if (alerts.some((alert) => alert.symbol === candle.s)) return;
 
   const id = `${candle.s}:${candle.t}`;
@@ -320,6 +422,8 @@ function handleKline(message) {
     id,
     symbol: candle.s,
     movePercent,
+    direction: movePercent > 0 ? "LONG" : "SHORT",
+    tradeStatus: "not-traded",
     changePercent: tickerChanges.get(candle.s) ?? null,
     close,
     quoteVolume,
@@ -331,6 +435,244 @@ function handleKline(message) {
   renderAlerts();
   elements.lastUpdated.textContent = `Last signal ${formatCloseTime(alert.closeTime)}`;
   notify(alert);
+  if (settings.tradingEnabled) void executeSignal(alert);
+}
+
+function getTradeStatusLabel(status) {
+  return {
+    "not-traded": "NOT TRADED",
+    submitting: "SENDING ORDER",
+    placed: "ORDER PLACED",
+    failed: "ORDER FAILED",
+    "position-exists": "POSITION ALREADY OPEN",
+    "limit-reached": "OPEN TRADE LIMIT REACHED",
+    "direction-disabled": "DIRECTION DISABLED"
+  }[status] || String(status).replace(/-/g, " ").toUpperCase();
+}
+
+async function requestTradingApi(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...options.headers
+    }
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 405 && path.startsWith("/api/trading/")) {
+      throw new Error(
+        "This page is being served by a static or outdated server. Stop that server, run `npm start` in the Wickwatch folder, and open http://127.0.0.1:8000."
+      );
+    }
+    throw new Error(result.error || `Local trading service request failed (${response.status}).`);
+  }
+  return result;
+}
+
+function renderCredentialStatus() {
+  if (!tradingServiceAvailable) {
+    elements.credentialStatus.textContent = "Local trading service unavailable. Start Wickwatch with node server.js.";
+    elements.removeCredentialsButton.hidden = true;
+    return;
+  }
+  if (!tradingStatus?.configured) {
+    elements.credentialStatus.textContent = "No API credentials loaded. Enter a key and secret to configure trading.";
+    elements.removeCredentialsButton.hidden = true;
+    return;
+  }
+  const environment = tradingStatus.mode === "live" ? "Live" : "Demo";
+  elements.credentialStatus.textContent = `${environment} credentials loaded (${tradingStatus.apiKeyHint}).`;
+  elements.removeCredentialsButton.hidden = false;
+}
+
+async function refreshPositions() {
+  if (!tradingStatus?.configured) {
+    positions = new Map();
+    openPositionCount = 0;
+    renderAlerts();
+    renderTradingSession();
+    return;
+  }
+  const result = await requestTradingApi("/api/trading/positions");
+  openPositionCount = result.positions.length;
+  positions = new Map(result.positions.map((position) => [position.symbol, position]));
+  renderAlerts();
+  renderTradingSession();
+}
+
+async function loadTradingStatus() {
+  try {
+    await requestTradingApi("/api/trading/stop", { method: "POST" });
+    tradingStatus = await requestTradingApi("/api/trading/status");
+    tradingServiceAvailable = true;
+    settings.tradingEnabled = false;
+    settings.tradeMode = tradingStatus.mode;
+    settings.tradeDirection = tradingStatus.direction;
+    settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
+    settings.marginUnit = tradingStatus.marginUnit;
+    settings.maxOpenTrades = tradingStatus.maxOpenTrades;
+    saveSettings();
+    renderSettings();
+    renderCredentialStatus();
+    try {
+      await refreshPositions();
+    } catch (error) {
+      console.error("Could not load Binance positions.", error);
+      elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
+    }
+    if (tradingStatus.configured) {
+      window.setInterval(() => {
+        refreshPositions().catch((error) => {
+          console.error("Could not refresh Binance positions.", error);
+          elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
+        });
+      }, 15000);
+    }
+  } catch (error) {
+    tradingServiceAvailable = false;
+    settings.tradingEnabled = false;
+    console.error("Could not connect to the local trading service.", error);
+    renderCredentialStatus();
+    renderTradingSession();
+  }
+}
+
+async function toggleTradingSession() {
+  if (!tradingServiceAvailable || tradingSessionBusy) return;
+  const isActive = tradingStatus?.enabled === true;
+  if (isActive) {
+    tradingSessionBusy = true;
+    tradingStatus.enabled = false;
+    settings.tradingEnabled = false;
+    renderTradingSession();
+    try {
+      tradingStatus = await requestTradingApi("/api/trading/stop", { method: "POST" });
+      settings.tradingEnabled = false;
+      saveSettings();
+      showToast("Trading stopped. Open positions remain open; close them individually.");
+    } catch (error) {
+      console.error("Could not stop Binance automatic trading.", error);
+      showToast(`Could not stop trading: ${error.message}`);
+      try {
+        tradingStatus = await requestTradingApi("/api/trading/status");
+        settings.tradingEnabled = tradingStatus.enabled;
+      } catch (statusError) {
+        tradingServiceAvailable = false;
+        console.error("Could not refresh trading session status.", statusError);
+      }
+    } finally {
+      tradingSessionBusy = false;
+      renderTradingSession();
+    }
+    return;
+  }
+
+  if (!tradingStatus?.configured) {
+    showToast("Save Binance API credentials in Settings before starting trading.");
+    return;
+  }
+  if (Number(tradingStatus.marginAmount ?? settings.marginAmount) <= 0) {
+    showToast("Set a positive margin per trade in Settings before starting trading.");
+    return;
+  }
+  if (tradingStatus.mode === "live" &&
+      !window.confirm("Live trading places real Binance Futures orders using real funds. Start live trading?")) {
+    return;
+  }
+
+  tradingSessionBusy = true;
+  renderTradingSession();
+  try {
+    tradingStatus = await requestTradingApi("/api/trading/start", { method: "POST" });
+    settings.tradingEnabled = tradingStatus.enabled;
+    settings.tradeMode = tradingStatus.mode;
+    settings.tradeDirection = tradingStatus.direction;
+    settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
+    settings.marginUnit = tradingStatus.marginUnit;
+    saveSettings();
+    showToast(`Trading started in ${tradingStatus.mode.toUpperCase()} mode. New qualifying candles can place orders.`);
+  } catch (error) {
+    console.error("Could not start Binance automatic trading.", error);
+    showToast(`Trading did not start: ${error.message}`);
+    try {
+      tradingStatus = await requestTradingApi("/api/trading/status");
+      settings.tradingEnabled = tradingStatus.enabled;
+    } catch (statusError) {
+      tradingServiceAvailable = false;
+      console.error("Could not refresh trading session status.", statusError);
+    }
+  } finally {
+    tradingSessionBusy = false;
+    renderSettings();
+    renderCredentialStatus();
+  }
+}
+
+async function executeSignal(alert) {
+  if (!settings.tradingEnabled) return;
+  if (settings.tradeDirection !== "both" && settings.tradeDirection.toUpperCase() !== alert.direction) {
+    alert.tradeStatus = "direction-disabled";
+    saveAlerts();
+    renderAlerts();
+    return;
+  }
+  alert.tradeStatus = "submitting";
+  saveAlerts();
+  renderAlerts();
+  try {
+    const result = await requestTradingApi("/api/trading/signal", {
+      method: "POST",
+      body: JSON.stringify({
+        symbol: alert.symbol,
+        direction: alert.direction,
+        signalId: alert.id
+      })
+    });
+    alert.tradeStatus = result.status === "placed"
+      ? "placed"
+      : result.status === "position_exists"
+        ? "position-exists"
+        : result.status === "limit_reached"
+          ? "limit-reached"
+          : "direction-disabled";
+    if (result.status === "placed") {
+      showToast(`${alert.direction} market order placed for ${alert.symbol} at 5x.`);
+    } else if (result.status === "limit_reached") {
+      showToast(`Trade limit reached (${result.openTrades}/${result.limit}). No order was placed for ${alert.symbol}.`);
+    }
+    saveAlerts();
+    await refreshPositions();
+  } catch (error) {
+    alert.tradeStatus = "failed";
+    alert.tradeError = error.message;
+    console.error(`Could not place the ${alert.direction} order for ${alert.symbol}.`, error);
+    showToast(`Trade failed for ${alert.symbol}: ${error.message}`);
+    saveAlerts();
+    renderAlerts();
+  }
+}
+
+async function closeTrade(symbol) {
+  if (!window.confirm(`Send a market order to close the open ${symbol} position?`)) return;
+  closingSymbols.add(symbol);
+  renderAlerts();
+  try {
+    const result = await requestTradingApi("/api/trading/close", {
+      method: "POST",
+      body: JSON.stringify({ symbol })
+    });
+    showToast(result.status === "closed"
+      ? `Close order sent for ${symbol}.`
+      : `No open ${symbol} position was found.`);
+    await refreshPositions();
+  } catch (error) {
+    console.error(`Could not close the ${symbol} position.`, error);
+    showToast(`Could not close ${symbol}: ${error.message}`);
+  } finally {
+    closingSymbols.delete(symbol);
+    renderAlerts();
+  }
 }
 
 function subscribeToMarkets() {
@@ -515,6 +857,42 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     return;
   }
 
+  const maxOpenTrades = Number(elements.maxOpenTradesInput.value);
+  if (!Number.isInteger(maxOpenTrades) || maxOpenTrades < 1 || maxOpenTrades > MAX_OPEN_TRADES) {
+    elements.maxOpenTradesInput.setCustomValidity("Enter a whole number between 1 and 100.");
+    elements.maxOpenTradesInput.reportValidity();
+    return;
+  }
+
+  const marginText = elements.marginAmountInput.value.trim();
+  const marginAmount = marginText ? Number(marginText) : null;
+  const marginUnit = elements.marginUnitInput.value;
+  if (marginAmount !== null &&
+      (!Number.isFinite(marginAmount) || marginAmount <= 0 ||
+        (marginUnit === "percent" && marginAmount > 100))) {
+    elements.marginAmountInput.setCustomValidity(
+      marginUnit === "percent"
+        ? "Enter a margin above 0 and no greater than 100%."
+        : "Enter a positive USDT margin amount."
+    );
+    elements.marginAmountInput.reportValidity();
+    return;
+  }
+  const apiKey = elements.apiKeyInput.value.trim();
+  const apiSecret = elements.apiSecretInput.value.trim();
+  if (Boolean(apiKey) !== Boolean(apiSecret)) {
+    const invalidInput = apiKey ? elements.apiSecretInput : elements.apiKeyInput;
+    invalidInput.setCustomValidity("Enter both API credentials, or leave both blank.");
+    invalidInput.reportValidity();
+    return;
+  }
+  const tradeMode = elements.tradeModeInput.value;
+  const liveNeedsConfirmation = tradeMode === "live" && tradingStatus?.mode !== "live";
+  if (liveNeedsConfirmation &&
+      !window.confirm("Live trading places real Binance Futures orders using real funds. Continue with Live mode?")) {
+    return;
+  }
+
   const wantsNotifications = elements.notificationsInput.checked;
   let notifications = false;
   if (wantsNotifications && "Notification" in window) {
@@ -537,13 +915,76 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     showToast("This browser does not support desktop notifications.");
   }
 
-  settings = { threshold, alertLimit, notifications };
+  settings = {
+    threshold,
+    alertLimit,
+    maxOpenTrades,
+    notifications,
+    tradeMode,
+    tradeDirection: elements.tradeDirectionInput.value,
+    marginAmount: marginAmount ?? "",
+    marginUnit,
+    tradingEnabled: false
+  };
   if (saveSettings()) {
     alerts = alerts.slice(0, settings.alertLimit);
     saveAlerts();
     renderSettings();
     renderAlerts();
-    elements.settingsFeedback.textContent = "Settings saved";
+    try {
+      const tradingPayload = {
+        mode: tradeMode,
+        direction: settings.tradeDirection,
+        marginAmount,
+        marginUnit,
+        maxOpenTrades,
+        liveConfirmed: tradeMode === "live" && (liveNeedsConfirmation || tradingStatus?.mode === "live")
+      };
+      if (apiKey && apiSecret) {
+        tradingPayload.apiKey = apiKey;
+        tradingPayload.apiSecret = apiSecret;
+      }
+      tradingStatus = await requestTradingApi("/api/trading/config", {
+        method: "PUT",
+        body: JSON.stringify(tradingPayload)
+      });
+      tradingServiceAvailable = true;
+      settings.tradingEnabled = false;
+      elements.apiKeyInput.value = "";
+      elements.apiSecretInput.value = "";
+      saveSettings();
+      renderSettings();
+      renderCredentialStatus();
+      try {
+        await refreshPositions();
+      } catch (error) {
+        console.error("Could not refresh Binance positions after saving settings.", error);
+        elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
+      }
+      elements.settingsFeedback.textContent = "Settings saved";
+    } catch (error) {
+      settings.tradingEnabled = false;
+      saveSettings();
+      console.error("Could not save Binance trading settings.", error);
+      elements.settingsFeedback.textContent = `Scanner settings saved; trading settings were not applied: ${error.message}`;
+      showToast(`Trading settings were not saved: ${error.message}`);
+      try {
+        tradingStatus = await requestTradingApi("/api/trading/status");
+        tradingServiceAvailable = true;
+        settings.tradingEnabled = false;
+        settings.tradeMode = tradingStatus.mode;
+        settings.tradeDirection = tradingStatus.direction;
+        settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
+        settings.marginUnit = tradingStatus.marginUnit;
+        settings.maxOpenTrades = tradingStatus.maxOpenTrades;
+        saveSettings();
+      } catch (statusError) {
+        tradingServiceAvailable = false;
+        console.error("Could not refresh local trading service status.", statusError);
+      }
+      renderSettings();
+      renderCredentialStatus();
+    }
     window.setTimeout(() => { elements.settingsFeedback.textContent = ""; }, 2500);
   }
 });
@@ -558,10 +999,55 @@ elements.alertLimitInput.addEventListener("input", () => {
   elements.settingsFeedback.textContent = "";
 });
 
+elements.maxOpenTradesInput.addEventListener("input", () => {
+  elements.maxOpenTradesInput.setCustomValidity("");
+  elements.settingsFeedback.textContent = "";
+});
+
 elements.notificationsInput.addEventListener("change", () => {
   elements.settingsFeedback.textContent = "";
 });
 
+elements.marginAmountInput.addEventListener("input", () => {
+  elements.marginAmountInput.setCustomValidity("");
+  elements.settingsFeedback.textContent = "";
+});
+
+for (const input of [
+  elements.tradeDirectionInput,
+  elements.marginUnitInput,
+  elements.tradeModeInput,
+  elements.apiKeyInput,
+  elements.apiSecretInput
+]) {
+  input.addEventListener("input", () => {
+    input.setCustomValidity("");
+    elements.settingsFeedback.textContent = "";
+  });
+  input.addEventListener("change", () => { elements.settingsFeedback.textContent = ""; });
+}
+
+elements.removeCredentialsButton.addEventListener("click", async () => {
+  if (!window.confirm("Remove the API credentials from this local server? This does not close open Binance positions.")) {
+    return;
+  }
+  try {
+    tradingStatus = await requestTradingApi("/api/trading/credentials", { method: "DELETE" });
+    settings.tradingEnabled = false;
+    positions = new Map();
+    saveSettings();
+    renderSettings();
+    renderCredentialStatus();
+    renderAlerts();
+    showToast("API credentials removed. Any open positions remain on Binance.");
+  } catch (error) {
+    console.error("Could not remove Binance API credentials.", error);
+    showToast(`Could not remove credentials: ${error.message}`);
+  }
+});
+
 renderSettings();
 renderAlerts();
+elements.tradingSessionButton.addEventListener("click", () => { void toggleTradingSession(); });
+void loadTradingStatus();
 loadMarketsAndConnect();
