@@ -150,6 +150,10 @@ h1 { margin: 0; font-size: clamp(29px, 3vw, 37px); font-weight: 600; letter-spac
 .clear-button { display: flex; height: 31px; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid #303835; border-radius: 3px; background: transparent; color: #b6c0b9; cursor: pointer; font-size: 11px; transition: border-color .15s, color .15s; }
 .clear-button:hover:not(:disabled) { border-color: #ab7667; color: #e3aa9b; }
 .clear-button:disabled { color: #68716c; cursor: not-allowed; opacity: .6; }
+.panel-actions { display: flex; align-items: center; gap: 8px; }
+.export-button { display: flex; height: 31px; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid #344039; border-radius: 3px; background: rgba(200, 241, 105, .06); color: var(--accent); cursor: pointer; font-size: 11px; transition: background .15s, border-color .15s; }
+.export-button:hover:not(:disabled) { border-color: #779347; background: rgba(200, 241, 105, .12); }
+.export-button:disabled { color: #68716c; cursor: not-allowed; opacity: .6; }
 .clear-icon { position: relative; width: 12px; height: 13px; border: 1px solid currentColor; border-top: 0; border-radius: 0 0 2px 2px; transform: scale(.77); }
 .clear-icon::before { position: absolute; top: -3px; left: -2px; width: 14px; border-top: 1px solid currentColor; content: ""; }
 .clear-icon::after { position: absolute; top: -5px; left: 3px; width: 4px; height: 2px; border: 1px solid currentColor; border-bottom: 0; content: ""; }
@@ -165,6 +169,8 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .contract-name { color: #e1e9e3; font-family: var(--sans); font-size: 12px; font-weight: 600; }
 .contract-quote { margin-left: 4px; color: #7b8780; font-family: var(--sans); font-size: 10px; }
 .range-value { color: var(--green); }
+.change-value { color: var(--green); }
+.change-value.negative { color: #e58b83; }
 .range-track { display: inline-block; width: 36px; height: 3px; margin-left: 7px; overflow: hidden; border-radius: 2px; background: #29332d; vertical-align: middle; }
 .range-track span { display: block; height: 100%; border-radius: inherit; background: #94dba2; }
 .volume-value { color: #bbc6be; }
@@ -201,9 +207,11 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .range-symbol b { top: 22px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px; }
 .range-setting { padding-bottom: 15px; }
+.alert-limit-setting { border-top: 1px solid var(--border-subtle); }
 .setting-copy label { color: #dae2dc; font-size: 12px; font-weight: 600; }
 .setting-copy p { max-width: 440px; margin: 6px 0 0; color: #7f8b84; font-size: 11px; line-height: 1.6; }
 .threshold-control { display: flex; width: 112px; height: 39px; flex: 0 0 112px; align-items: center; padding: 0 10px; border: 1px solid #344039; border-radius: 4px; background: #0d1210; }
+.alert-limit-setting .threshold-control { width: 140px; flex-basis: 140px; }
 .threshold-control:focus-within { border-color: #779347; }
 .threshold-control input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-family: var(--mono); font-size: 15px; }
 .threshold-control input::-webkit-inner-spin-button, .threshold-control input::-webkit-outer-spin-button { margin: 0; appearance: none; }

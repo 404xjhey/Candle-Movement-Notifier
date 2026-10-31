@@ -95,9 +95,14 @@
                 <div class="panel-title-row"><span class="panel-live-mark"></span><h2 id="alerts-title">Latest alerts</h2><span class="count-pill" id="count-pill">0</span></div>
                 <p class="panel-subtitle">Closed green candles that meet your open-to-close move threshold</p>
               </div>
-              <button class="clear-button" id="clear-button" type="button" disabled>
-                <span class="clear-icon" aria-hidden="true"></span> Clear records
-              </button>
+              <div class="panel-actions">
+                <button class="export-button" id="export-button" type="button" disabled>
+                  Export Excel
+                </button>
+                <button class="clear-button" id="clear-button" type="button" disabled>
+                  <span class="clear-icon" aria-hidden="true"></span> Clear records
+                </button>
+              </div>
             </div>
 
             <div class="table-wrap">
@@ -106,6 +111,7 @@
                   <tr>
                     <th scope="col">CONTRACT</th>
                     <th scope="col">CANDLE MOVE</th>
+                    <th scope="col">24H CHANGE</th>
                     <th scope="col">CLOSE PRICE</th>
                     <th scope="col">1M VOLUME (USDT)</th>
                     <th scope="col">BIAS</th>
@@ -124,7 +130,7 @@
               </div>
             </div>
             <div class="panel-footer">
-              <span>Showing up to <strong>20</strong> most recent alerts</span>
+              <span>Showing up to <strong id="alert-limit-display">20</strong> most recent alerts</span>
               <span class="footer-live"><span></span> UPDATES IN REAL TIME</span>
             </div>
           </section>
@@ -160,6 +166,17 @@
               </div>
             </div>
             <div class="setting-note"><span class="note-icon">i</span><span>For example, a 5% move means the candle closes at least 5% above its open.</span></div>
+
+            <div class="setting-row alert-limit-setting">
+              <div class="setting-copy">
+                <label for="alert-limit-input">Maximum alerts to display</label>
+                <p>Keep this many of the most recent alerts in your history. Choose between 1 and 500.</p>
+              </div>
+              <div class="threshold-control">
+                <input id="alert-limit-input" name="alertLimit" type="number" min="1" max="500" step="1" value="20" required>
+                <span>alerts</span>
+              </div>
+            </div>
 
             <div class="setting-row notification-setting">
               <div class="setting-copy">
