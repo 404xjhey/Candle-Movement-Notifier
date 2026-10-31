@@ -115,9 +115,17 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 h1 { margin: 0; font-size: clamp(29px, 3vw, 37px); font-weight: 600; letter-spacing: -1.5px; line-height: 1.12; }
 .heading-period { color: var(--accent); }
 .page-description { margin: 9px 0 0; color: #87928c; font-size: 13px; }
+.overview-heading-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
 .heading-meta { display: flex; align-items: center; gap: 8px; margin-top: 35px; color: #87928c; font-family: var(--mono); font-size: 9px; letter-spacing: .55px; white-space: nowrap; }
 .heading-meta .live-pulse { width: 6px; height: 6px; }
 .meta-separator { margin: 0 2px; color: #45504a; }
+.trade-session-button { min-width: 154px; min-height: 36px; padding: 0 13px; border: 1px solid #c8f169; border-radius: 4px; background: var(--accent); color: #171d12; cursor: pointer; font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
+.trade-session-button:hover:not(:disabled) { background: #d9ff87; }
+.trade-session-button.stop-session { border-color: #b9766d; background: rgba(229, 139, 131, .13); color: #f0a79d; }
+.trade-session-button.stop-session:hover:not(:disabled) { background: rgba(229, 139, 131, .22); }
+.trade-session-button:disabled { border-color: #344039; background: #19201d; color: #68746d; cursor: not-allowed; }
+.trade-session-status { color: #849089; font-family: var(--mono); font-size: 8px; letter-spacing: .6px; }
+.trade-session-status.session-active { color: var(--accent); }
 
 .connection-message { margin: 0 0 17px; padding: 11px 14px; border: 1px solid rgba(226, 130, 102, .26); border-radius: 4px; background: rgba(226, 130, 102, .06); color: #e2a38c; font-size: 12px; line-height: 1.5; }
 .connection-message[hidden] { display: none; }
@@ -170,6 +178,7 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .contract-name { color: #e1e9e3; font-family: var(--sans); font-size: 12px; font-weight: 600; }
 .contract-quote { margin-left: 4px; color: #7b8780; font-family: var(--sans); font-size: 10px; }
 .range-value { color: var(--green); }
+.range-value.negative { color: #e58b83; }
 .change-value { color: var(--green); }
 .change-value.negative { color: #e58b83; }
 .pnl-value { color: var(--green); }
@@ -179,7 +188,16 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .volume-value { color: #bbc6be; }
 .bias-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid rgba(121, 207, 151, .2); border-radius: 3px; background: var(--green-dim); color: var(--green); font-family: var(--sans); font-size: 9px; font-weight: 600; letter-spacing: .3px; }
 .bias-pill::before { content: "\2191"; font-size: 10px; }
+.bias-pill.short-bias { border-color: rgba(229, 139, 131, .24); background: rgba(229, 139, 131, .08); color: #e58b83; }
+.bias-pill.short-bias::before { content: "\2193"; }
 .closed-time { color: #849089; font-size: 10px; }
+.trade-cell { min-width: 120px; }
+.close-trade-button { padding: 6px 9px; border: 1px solid rgba(229, 139, 131, .35); border-radius: 3px; background: rgba(229, 139, 131, .08); color: #eaa197; cursor: pointer; font-family: var(--sans); font-size: 9px; font-weight: 700; letter-spacing: .4px; }
+.close-trade-button:hover:not(:disabled) { border-color: #e58b83; background: rgba(229, 139, 131, .16); }
+.close-trade-button:disabled { cursor: not-allowed; opacity: .5; }
+.trade-status { display: block; margin-top: 4px; color: #89958d; font-family: var(--sans); font-size: 8px; letter-spacing: .2px; }
+.trade-status-failed { color: #e58b83; }
+.trade-status-placed { color: var(--green); }
 .empty-state { display: flex; min-height: 268px; flex-direction: column; align-items: center; justify-content: center; padding: 30px 20px; text-align: center; }
 .empty-graphic { display: flex; height: 38px; align-items: center; gap: 8px; margin-bottom: 13px; }
 .empty-line { display: block; width: 22px; height: 1px; background: #334039; }
@@ -204,6 +222,9 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .settings-card { overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: rgba(17, 23, 22, .85); }
 .settings-card-heading { display: flex; align-items: center; gap: 13px; padding: 19px 22px; border-bottom: 1px solid var(--border-subtle); }
 .settings-card-heading p { margin: 5px 0 0; color: #7f8a84; font-size: 11px; }
+.trading-heading { border-top: 1px solid var(--border-subtle); }
+.session-state-pill { padding: 6px 9px; border: 1px solid #344039; border-radius: 3px; color: #89958d; font-family: var(--mono); font-size: 9px; letter-spacing: .4px; }
+.session-state-pill.session-active { border-color: rgba(200, 241, 105, .35); background: var(--accent-dim); color: var(--accent); }
 .settings-symbol { position: relative; display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid #38432f; border-radius: 4px; background: rgba(200, 241, 105, .06); }
 .range-symbol span { width: 11px; height: 12px; border: 1px solid var(--accent); border-radius: 1px; }
 .range-symbol i, .range-symbol b { position: absolute; top: 9px; left: 17px; width: 1px; height: 5px; background: var(--accent); }
@@ -215,11 +236,25 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .setting-copy p { max-width: 440px; margin: 6px 0 0; color: #7f8b84; font-size: 11px; line-height: 1.6; }
 .threshold-control { display: flex; width: 112px; height: 39px; flex: 0 0 112px; align-items: center; padding: 0 10px; border: 1px solid #344039; border-radius: 4px; background: #0d1210; }
 .alert-limit-setting .threshold-control { width: 140px; flex-basis: 140px; }
+.max-open-trades-setting .threshold-control { width: 140px; flex-basis: 140px; }
 .threshold-control:focus-within { border-color: #779347; }
 .threshold-control input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-family: var(--mono); font-size: 15px; }
 .threshold-control input::-webkit-inner-spin-button, .threshold-control input::-webkit-outer-spin-button { margin: 0; appearance: none; }
 .threshold-control input[type=number] { appearance: textfield; }
 .threshold-control > span { color: var(--accent); font-family: var(--mono); }
+.settings-select { max-width: 245px; min-height: 39px; flex: 0 0 245px; padding: 0 10px; border: 1px solid #344039; border-radius: 4px; background: #0d1210; color: var(--text); font-size: 11px; }
+.settings-select:focus-visible, .margin-control:focus-within { border-color: #779347; }
+.margin-control { display: flex; width: 245px; min-height: 39px; flex: 0 0 245px; align-items: center; border: 1px solid #344039; border-radius: 4px; background: #0d1210; }
+.margin-control input { width: 100%; min-width: 0; padding: 0 10px; border: 0; outline: 0; background: transparent; color: var(--text); font-family: var(--mono); font-size: 14px; }
+.margin-control input::placeholder { color: #69756e; font-family: var(--sans); font-size: 10px; }
+.margin-control select { min-height: 37px; padding: 0 8px; border: 0; border-left: 1px solid #344039; background: #151c19; color: var(--accent); font-family: var(--mono); font-size: 9px; }
+.credentials-block { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 245px); align-items: center; gap: 12px 24px; padding: 22px; border-top: 1px solid var(--border-subtle); }
+.credentials-block > input { width: 100%; min-width: 0; min-height: 39px; padding: 0 10px; border: 1px solid #344039; border-radius: 4px; background: #0d1210; color: var(--text); font-family: var(--mono); font-size: 12px; }
+.credentials-block > input::placeholder { color: #69756e; font-family: var(--sans); font-size: 10px; }
+.credentials-secret-copy { grid-column: 1; }
+.credential-status { grid-column: 1 / -1; color: #9ebc77; font-size: 10px; line-height: 1.5; }
+.remove-credentials { grid-column: 1 / -1; justify-self: start; margin: -5px 0 0; color: #e58b83; }
+.trading-note { margin-top: 0; }
 .setting-note { display: flex; align-items: center; gap: 8px; margin: 0 22px 19px; padding: 10px 11px; border: 1px solid #29342c; border-radius: 3px; background: rgba(200, 241, 105, .035); color: #9aa79d; font-size: 10px; }
 .note-icon, .about-icon { display: grid; width: 14px; height: 14px; flex: 0 0 14px; place-items: center; border: 1px solid #718358; border-radius: 50%; color: var(--accent); font-family: var(--mono); font-size: 9px; font-style: normal; }
 .notification-setting { border-top: 1px solid var(--border-subtle); }
@@ -271,6 +306,7 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
   .page { padding-top: 31px; }
   .page-heading { min-height: 120px; }
   .heading-meta { margin-top: 37px; font-size: 8px; }
+  .overview-heading-actions { align-items: flex-start; }
   .stats-grid { grid-template-columns: 1fr; gap: 8px; }
   .stat-card { min-height: 112px; }
   .panel-heading { padding-right: 13px; padding-left: 13px; }
@@ -279,6 +315,11 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
   .footer-live { font-size: 7px; }
   .page-footer { gap: 12px; font-size: 7px; }
   .setting-row { padding-right: 16px; padding-left: 16px; }
+  .settings-select, .margin-control { width: min(45%, 245px); flex-basis: min(45%, 245px); }
+  .credentials-block { grid-template-columns: 1fr; gap: 10px; padding: 17px 16px; }
+  .credentials-block > input { grid-column: 1; }
+  .credentials-secret-copy { margin-top: 5px; }
+  .credential-status, .remove-credentials { grid-column: 1; }
   .setting-note { margin-right: 16px; margin-left: 16px; }
   .settings-card-footer { padding-right: 16px; padding-left: 16px; }
 }
@@ -290,7 +331,8 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
   .topbar-divider { height: 12px; }
   .timeframe-badge { font-size: 8px; }
   .page-heading { min-height: 138px; flex-direction: column; }
-  .heading-meta { margin-top: 12px; }
+  .overview-heading-actions { width: 100%; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+  .heading-meta { margin-top: 0; }
   .page-description { max-width: 290px; font-size: 12px; }
   .panel-heading { align-items: flex-start; gap: 8px; }
   .panel-subtitle { max-width: 220px; line-height: 1.5; }
