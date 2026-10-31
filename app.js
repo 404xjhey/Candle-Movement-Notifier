@@ -38,6 +38,7 @@ let settings = loadSettings();
 let alerts = loadAlerts();
 let markets = [];
 const tickerChanges = new Map();
+const tickerPrices = new Map();
 let socket;
 let reconnectTimer;
 let subscriptionTimer;
@@ -70,7 +71,7 @@ function loadAlerts() {
     if (!Array.isArray(saved)) {
       throw new TypeError("Saved alerts must be an array.");
     }
-    return saved.filter((alert) =>
+    const validAlerts = saved.filter((alert) =>
       alert &&
       typeof alert.id === "string" &&
       typeof alert.symbol === "string" &&
@@ -81,7 +82,17 @@ function loadAlerts() {
     ).map((alert) => ({
       ...alert,
       changePercent: Number.isFinite(alert.changePercent) ? alert.changePercent : null
-    })).slice(0, settings.alertLimit);
+    }));
+    const seenSymbols = new Set();
+    return validAlerts
+      .sort((a, b) => a.closeTime - b.closeTime)
+      .filter((alert) => {
+        if (seenSymbols.has(alert.symbol)) return false;
+        seenSymbols.add(alert.symbol);
+        return true;
+      })
+      .sort((a, b) => b.closeTime - a.closeTime)
+      .slice(0, settings.alertLimit);
   } catch (error) {
     console.warn("Could not read Wickwatch alerts from local storage.", error);
     return [];
@@ -158,6 +169,13 @@ function formatChangePercent(value) {
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
+function getPnlPercent(alert) {
+  const currentPrice = tickerPrices.get(alert.symbol);
+  return Number.isFinite(currentPrice)
+    ? ((currentPrice - alert.close) / alert.close) * 100
+    : null;
+}
+
 function addCell(row, className, text) {
   const cell = document.createElement("td");
   if (className) cell.className = className;
@@ -171,12 +189,16 @@ function renderAlerts() {
   for (const alert of alerts) {
     const row = document.createElement("tr");
     const contractCell = document.createElement("td");
-    const contract = document.createElement("div");
+    const contract = document.createElement("a");
     const coinMark = document.createElement("span");
     const symbol = document.createElement("span");
     const quote = document.createElement("span");
 
     contract.className = "contract-cell";
+    contract.href = `https://www.binance.com/en/futures/${encodeURIComponent(alert.symbol)}`;
+    contract.target = "_blank";
+    contract.rel = "noopener noreferrer";
+    contract.setAttribute("aria-label", `Open ${alert.symbol} chart on Binance Futures in a new tab`);
     coinMark.className = "coin-mark";
     coinMark.textContent = alert.symbol.slice(0, 1);
     symbol.className = "contract-name";
@@ -200,6 +222,9 @@ function renderAlerts() {
     changeCell.classList.toggle("negative", Number.isFinite(changePercent) && changePercent < 0);
 
     addCell(row, "", formatPrice(alert.close));
+    const pnlPercent = getPnlPercent(alert);
+    const pnlCell = addCell(row, "pnl-value", formatChangePercent(pnlPercent));
+    pnlCell.classList.toggle("negative", Number.isFinite(pnlPercent) && pnlPercent < 0);
     addCell(row, "volume-value", formatVolume(alert.quoteVolume));
 
     const biasCell = document.createElement("td");
@@ -228,22 +253,29 @@ function handleTickers(tickers) {
   let shouldRender = false;
   for (const ticker of tickers) {
     if (typeof ticker.s !== "string") continue;
-    const changePercent = Number(ticker.P);
-    if (!Number.isFinite(changePercent)) continue;
+    const currentPrice = Number(ticker.c);
+    if (Number.isFinite(currentPrice) && currentPrice > 0) {
+      tickerPrices.set(ticker.s, currentPrice);
+      if (alertSymbols.has(ticker.s)) shouldRender = true;
+    }
 
-    tickerChanges.set(ticker.s, changePercent);
-    if (alertSymbols.has(ticker.s)) shouldRender = true;
+    const changePercent = Number(ticker.P);
+    if (Number.isFinite(changePercent)) {
+      tickerChanges.set(ticker.s, changePercent);
+      if (alertSymbols.has(ticker.s)) shouldRender = true;
+    }
   }
   if (shouldRender) renderAlerts();
 }
 
 function exportAlerts() {
-  const headers = ["Contract", "Candle Move", "24h Change", "Close Price", "1m Volume (USDT)", "Bias", "Closed At"];
+  const headers = ["Contract", "Candle Move", "24h Change", "Close Price", "PnL %", "1m Volume (USDT)", "Bias", "Closed At"];
   const rows = alerts.map((alert) => [
     alert.symbol,
     `${alert.movePercent.toFixed(2)}%`,
     formatChangePercent(tickerChanges.get(alert.symbol) ?? alert.changePercent),
     String(alert.close),
+    formatChangePercent(getPnlPercent(alert)),
     String(alert.quoteVolume),
     "Bullish",
     new Date(alert.closeTime).toISOString()
@@ -278,6 +310,7 @@ function handleKline(message) {
 
   const movePercent = ((close - open) / open) * 100;
   if (movePercent <= settings.threshold) return;
+  if (alerts.some((alert) => alert.symbol === candle.s)) return;
 
   const id = `${candle.s}:${candle.t}`;
   if (seenCandles.has(id)) return;

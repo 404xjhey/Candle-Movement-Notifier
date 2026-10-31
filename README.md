@@ -24,7 +24,10 @@ key or trading permissions are needed.
 - Records a signal only after a candle closes green and its open-to-close move
   (`(close - open) / open * 100`) is strictly greater than the configured threshold.
 - Shows the move percentage, close price, candle quote volume in USDT, bullish
-  bias, 24-hour token change, and close time for each signal.
+  bias, 24-hour token change, PnL percentage from the signal's close to the
+  current token price, and close time for each signal. Only the first signal
+  for each token is kept in the current alert list.
+- Opens the matching Binance Futures chart in a new tab when a contract is clicked.
 - Keeps the configured number of most recent records (1–500), with controls to
   export the history as an Excel-compatible CSV or clear it.
 - Saves the threshold, alert limit, notification preference, and alert history
