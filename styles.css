@@ -164,13 +164,16 @@ th { padding: 0 15px; color: #6f7a74; font-family: var(--mono); font-size: 8px; 
 th:first-child, td:first-child { padding-left: 20px; }
 th:last-child, td:last-child { padding-right: 20px; }
 td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0ca; font-family: var(--mono); font-size: 11px; white-space: nowrap; }
-.contract-cell { display: flex; align-items: center; gap: 10px; }
+.contract-cell { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
+.contract-cell:hover .contract-name { color: var(--accent); }
 .coin-mark { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; border: 1px solid #34412f; border-radius: 50%; background: #1b251a; color: var(--accent); font-family: var(--sans); font-size: 10px; font-weight: 700; }
 .contract-name { color: #e1e9e3; font-family: var(--sans); font-size: 12px; font-weight: 600; }
 .contract-quote { margin-left: 4px; color: #7b8780; font-family: var(--sans); font-size: 10px; }
 .range-value { color: var(--green); }
 .change-value { color: var(--green); }
 .change-value.negative { color: #e58b83; }
+.pnl-value { color: var(--green); }
+.pnl-value.negative { color: #e58b83; }
 .range-track { display: inline-block; width: 36px; height: 3px; margin-left: 7px; overflow: hidden; border-radius: 2px; background: #29332d; vertical-align: middle; }
 .range-track span { display: block; height: 100%; border-radius: inherit; background: #94dba2; }
 .volume-value { color: #bbc6be; }
