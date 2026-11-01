@@ -3,7 +3,10 @@ const test = require("node:test");
 const {
   createServer,
   countOpenTrades,
+  formatPrice,
   formatQuantity,
+  getLimitEntryPrice,
+  getStopLossPrice,
   getTradeDirection,
   getOpenPositions,
   getStatus,
@@ -22,6 +25,20 @@ test("maps candle direction to the selected trading strategy", () => {
   assert.equal(getTradeDirection("SHORT", "default"), "SHORT");
   assert.equal(getTradeDirection("LONG", "reverse-call"), "SHORT");
   assert.equal(getTradeDirection("SHORT", "reverse-call"), "LONG");
+  assert.equal(getTradeDirection("LONG", "reverse-call-limit"), "SHORT");
+  assert.equal(getTradeDirection("SHORT", "reverse-call-limit"), "LONG");
+});
+
+test("prices reverse-call limit entries from candle extremes and rounds toward the limit", () => {
+  assert.equal(getLimitEntryPrice("LONG", 100, 95, "0.01"), "102.50");
+  assert.equal(getLimitEntryPrice("SHORT", 100, 95, "0.01"), "92.62");
+  assert.equal(formatPrice(102.501, "0.01", "up"), "102.51");
+  assert.equal(formatPrice(92.629, "0.01", "down"), "92.62");
+});
+
+test("sets stop triggers at approximately 50% PnL loss using 5x leverage", () => {
+  assert.equal(getStopLossPrice("SHORT", 102.5, "0.01"), "112.75");
+  assert.equal(getStopLossPrice("LONG", 92.62, "0.01"), "83.36");
 });
 
 test("returns only nonzero positions with a normalized direction", () => {
@@ -58,6 +75,7 @@ test("validates the maximum open trade setting", () => {
   assert.throws(() => validateConfig({ ...config, maxOpenTrades: 101 }), /between 1 and 100/);
   assert.throws(() => validateConfig({ ...config, strategy: "unknown" }), /supported trading strategy/);
   assert.doesNotThrow(() => validateConfig({ ...config, maxOpenTrades: 5 }));
+  assert.equal(validateConfig({ ...config, strategy: "reverse-call-limit" }).strategy, "reverse-call-limit");
   assert.equal(validateConfig(config).strategy, "default");
 });
 
@@ -109,6 +127,7 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.match(pageContent, /Wickwatch/);
   assert.match(pageContent, /id="max-open-trades-input"[^>]*value="5"/);
   assert.match(pageContent, /id="strategy-input"/);
+  assert.match(pageContent, /value="reverse-call-limit">Reverse call with limit/);
 
   const rejected = await fetch(`${baseUrl}/api/trading/status`, {
     headers: { Origin: "https://untrusted.example" }
@@ -121,7 +140,7 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
     body: JSON.stringify({
       mode: "demo",
       enabled: true,
-      strategy: "reverse-call",
+      strategy: "reverse-call-limit",
       direction: "both",
       marginAmount: 1,
       marginUnit: "percent",
@@ -131,7 +150,7 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.equal(savedConfig.status, 200);
   const savedStatus = await savedConfig.json();
   assert.equal(savedStatus.enabled, false);
-  assert.equal(savedStatus.strategy, "reverse-call");
+  assert.equal(savedStatus.strategy, "reverse-call-limit");
   assert.equal(savedStatus.maxOpenTrades, 5);
 
   const startWithoutCredentials = await fetch(`${baseUrl}/api/trading/start`, { method: "POST" });
