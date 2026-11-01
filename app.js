@@ -8,6 +8,7 @@ const DEFAULT_MAX_OPEN_TRADES = 5;
 const MAX_OPEN_TRADES = 100;
 const SUBSCRIPTION_BATCH_SIZE = 100;
 const SUBSCRIPTION_INTERVAL_MS = 250;
+const REVERSE_CALL_LOOKBACK_MINUTES = 120;
 
 const elements = {
   connectionIndicator: document.querySelector("#connection-indicator"),
@@ -30,6 +31,7 @@ const elements = {
   alertLimitInput: document.querySelector("#alert-limit-input"),
   maxOpenTradesInput: document.querySelector("#max-open-trades-input"),
   notificationsInput: document.querySelector("#notifications-input"),
+  strategyInput: document.querySelector("#strategy-input"),
   tradeDirectionInput: document.querySelector("#trade-direction-input"),
   marginAmountInput: document.querySelector("#margin-amount-input"),
   marginUnitInput: document.querySelector("#margin-unit-input"),
@@ -84,6 +86,7 @@ function loadSettings() {
         : DEFAULT_MAX_OPEN_TRADES,
       notifications: saved.notifications === true,
       tradeMode: saved.tradeMode === "live" ? "live" : "demo",
+      strategy: ["default", "reverse-call"].includes(saved.strategy) ? saved.strategy : "default",
       tradeDirection: ["both", "long", "short"].includes(saved.tradeDirection) ? saved.tradeDirection : "both",
       marginAmount: Number.isFinite(Number(saved.marginAmount)) && Number(saved.marginAmount) > 0
         ? Number(saved.marginAmount)
@@ -99,6 +102,7 @@ function loadSettings() {
       maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
       notifications: false,
       tradeMode: "demo",
+      strategy: "default",
       tradeDirection: "both",
       marginAmount: "",
       marginUnit: "percent",
@@ -191,6 +195,7 @@ function renderSettings() {
   elements.alertLimitInput.value = String(settings.alertLimit);
   elements.maxOpenTradesInput.value = String(settings.maxOpenTrades);
   elements.notificationsInput.checked = settings.notifications;
+  elements.strategyInput.value = settings.strategy;
   elements.tradeDirectionInput.value = settings.tradeDirection;
   elements.marginAmountInput.value = settings.marginAmount === "" ? "" : String(settings.marginAmount);
   elements.marginUnitInput.value = settings.marginUnit;
@@ -401,6 +406,26 @@ function notify(alert) {
   });
 }
 
+async function hasRecentClosingPrice(alert) {
+  const url = new URL(`${API_BASE}/fapi/v1/klines`);
+  url.search = new URLSearchParams({
+    symbol: alert.symbol,
+    interval: "1m",
+    startTime: String(alert.openTime - REVERSE_CALL_LOOKBACK_MINUTES * 60 * 1000),
+    endTime: String(alert.openTime - 1),
+    limit: String(REVERSE_CALL_LOOKBACK_MINUTES)
+  });
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Binance candle history request failed (${response.status}).`);
+  }
+  const candles = await response.json();
+  if (!Array.isArray(candles)) {
+    throw new Error("Binance returned invalid candle history.");
+  }
+  return candles.some((candle) => Number(candle[4]) === alert.close);
+}
+
 function handleKline(message) {
   const candle = message.k;
   if (!candle || candle.i !== "1m" || candle.x !== true) return;
@@ -425,6 +450,7 @@ function handleKline(message) {
     direction: movePercent > 0 ? "LONG" : "SHORT",
     tradeStatus: "not-traded",
     changePercent: tickerChanges.get(candle.s) ?? null,
+    openTime: candle.t,
     close,
     quoteVolume,
     closeTime: candle.T
@@ -446,7 +472,9 @@ function getTradeStatusLabel(status) {
     failed: "ORDER FAILED",
     "position-exists": "POSITION ALREADY OPEN",
     "limit-reached": "OPEN TRADE LIMIT REACHED",
-    "direction-disabled": "DIRECTION DISABLED"
+    "direction-disabled": "DIRECTION DISABLED",
+    "recent-close-price": "RECENT CLOSE PRICE",
+    "history-check-failed": "HISTORY CHECK FAILED"
   }[status] || String(status).replace(/-/g, " ").toUpperCase();
 }
 
@@ -508,6 +536,7 @@ async function loadTradingStatus() {
     tradingServiceAvailable = true;
     settings.tradingEnabled = false;
     settings.tradeMode = tradingStatus.mode;
+    settings.strategy = tradingStatus.strategy;
     settings.tradeDirection = tradingStatus.direction;
     settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
     settings.marginUnit = tradingStatus.marginUnit;
@@ -587,6 +616,7 @@ async function toggleTradingSession() {
     tradingStatus = await requestTradingApi("/api/trading/start", { method: "POST" });
     settings.tradingEnabled = tradingStatus.enabled;
     settings.tradeMode = tradingStatus.mode;
+    settings.strategy = tradingStatus.strategy;
     settings.tradeDirection = tradingStatus.direction;
     settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
     settings.marginUnit = tradingStatus.marginUnit;
@@ -611,11 +641,33 @@ async function toggleTradingSession() {
 
 async function executeSignal(alert) {
   if (!settings.tradingEnabled) return;
-  if (settings.tradeDirection !== "both" && settings.tradeDirection.toUpperCase() !== alert.direction) {
+  const tradeDirection = settings.strategy === "reverse-call"
+    ? (alert.direction === "LONG" ? "SHORT" : "LONG")
+    : alert.direction;
+  if (settings.tradeDirection !== "both" && settings.tradeDirection.toUpperCase() !== tradeDirection) {
     alert.tradeStatus = "direction-disabled";
     saveAlerts();
     renderAlerts();
     return;
+  }
+  if (settings.strategy === "reverse-call") {
+    try {
+      if (await hasRecentClosingPrice(alert)) {
+        alert.tradeStatus = "recent-close-price";
+        saveAlerts();
+        renderAlerts();
+        showToast(`Reverse Call skipped for ${alert.symbol}: this close price appeared in the previous 120 minutes.`);
+        return;
+      }
+    } catch (error) {
+      alert.tradeStatus = "history-check-failed";
+      alert.tradeError = error.message;
+      saveAlerts();
+      renderAlerts();
+      console.error(`Could not verify recent candle history for ${alert.symbol}.`, error);
+      showToast(`Reverse Call skipped for ${alert.symbol}: recent price history could not be verified.`);
+      return;
+    }
   }
   alert.tradeStatus = "submitting";
   saveAlerts();
@@ -635,18 +687,22 @@ async function executeSignal(alert) {
         ? "position-exists"
         : result.status === "limit_reached"
           ? "limit-reached"
-          : "direction-disabled";
+          : result.status === "recent_close_price"
+            ? "recent-close-price"
+            : "direction-disabled";
     if (result.status === "placed") {
-      showToast(`${alert.direction} market order placed for ${alert.symbol} at 5x.`);
+      showToast(`${result.direction || tradeDirection} market order placed for ${alert.symbol} at 5x.`);
     } else if (result.status === "limit_reached") {
       showToast(`Trade limit reached (${result.openTrades}/${result.limit}). No order was placed for ${alert.symbol}.`);
+    } else if (result.status === "recent_close_price") {
+      showToast(`Reverse Call skipped for ${alert.symbol}: the current price appeared in the previous 120 minutes.`);
     }
     saveAlerts();
     await refreshPositions();
   } catch (error) {
     alert.tradeStatus = "failed";
     alert.tradeError = error.message;
-    console.error(`Could not place the ${alert.direction} order for ${alert.symbol}.`, error);
+    console.error(`Could not place the ${tradeDirection} order for ${alert.symbol}.`, error);
     showToast(`Trade failed for ${alert.symbol}: ${error.message}`);
     saveAlerts();
     renderAlerts();
@@ -921,6 +977,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     maxOpenTrades,
     notifications,
     tradeMode,
+    strategy: elements.strategyInput.value,
     tradeDirection: elements.tradeDirectionInput.value,
     marginAmount: marginAmount ?? "",
     marginUnit,
@@ -934,6 +991,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     try {
       const tradingPayload = {
         mode: tradeMode,
+        strategy: settings.strategy,
         direction: settings.tradeDirection,
         marginAmount,
         marginUnit,
@@ -973,6 +1031,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
         tradingServiceAvailable = true;
         settings.tradingEnabled = false;
         settings.tradeMode = tradingStatus.mode;
+        settings.strategy = tradingStatus.strategy;
         settings.tradeDirection = tradingStatus.direction;
         settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
         settings.marginUnit = tradingStatus.marginUnit;
@@ -1014,6 +1073,7 @@ elements.marginAmountInput.addEventListener("input", () => {
 });
 
 for (const input of [
+  elements.strategyInput,
   elements.tradeDirectionInput,
   elements.marginUnitInput,
   elements.tradeModeInput,

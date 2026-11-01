@@ -4,6 +4,7 @@ const {
   createServer,
   countOpenTrades,
   formatQuantity,
+  getTradeDirection,
   getOpenPositions,
   getStatus,
   hasTradeCapacity,
@@ -14,6 +15,13 @@ test("formats market quantities down to Binance step size", () => {
   assert.equal(formatQuantity(1.239, "0.01"), "1.23");
   assert.equal(formatQuantity(0.0019, "0.0001"), "0.0019");
   assert.equal(formatQuantity(5, "1.000"), "5");
+});
+
+test("maps candle direction to the selected trading strategy", () => {
+  assert.equal(getTradeDirection("LONG", "default"), "LONG");
+  assert.equal(getTradeDirection("SHORT", "default"), "SHORT");
+  assert.equal(getTradeDirection("LONG", "reverse-call"), "SHORT");
+  assert.equal(getTradeDirection("SHORT", "reverse-call"), "LONG");
 });
 
 test("returns only nonzero positions with a normalized direction", () => {
@@ -48,7 +56,9 @@ test("validates the maximum open trade setting", () => {
   };
   assert.throws(() => validateConfig({ ...config, maxOpenTrades: 0 }), /between 1 and 100/);
   assert.throws(() => validateConfig({ ...config, maxOpenTrades: 101 }), /between 1 and 100/);
+  assert.throws(() => validateConfig({ ...config, strategy: "unknown" }), /supported trading strategy/);
   assert.doesNotThrow(() => validateConfig({ ...config, maxOpenTrades: 5 }));
+  assert.equal(validateConfig(config).strategy, "default");
 });
 
 test("validates margin and paired API credentials when saving trading settings", () => {
@@ -98,6 +108,7 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   const pageContent = await page.text();
   assert.match(pageContent, /Wickwatch/);
   assert.match(pageContent, /id="max-open-trades-input"[^>]*value="5"/);
+  assert.match(pageContent, /id="strategy-input"/);
 
   const rejected = await fetch(`${baseUrl}/api/trading/status`, {
     headers: { Origin: "https://untrusted.example" }
@@ -110,6 +121,7 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
     body: JSON.stringify({
       mode: "demo",
       enabled: true,
+      strategy: "reverse-call",
       direction: "both",
       marginAmount: 1,
       marginUnit: "percent",
@@ -119,6 +131,7 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.equal(savedConfig.status, 200);
   const savedStatus = await savedConfig.json();
   assert.equal(savedStatus.enabled, false);
+  assert.equal(savedStatus.strategy, "reverse-call");
   assert.equal(savedStatus.maxOpenTrades, 5);
 
   const startWithoutCredentials = await fetch(`${baseUrl}/api/trading/start`, { method: "POST" });
