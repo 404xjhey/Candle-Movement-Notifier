@@ -6,6 +6,7 @@ const path = require("node:path");
 const ROOT = __dirname;
 const DEFAULT_PORT = 8000;
 const LEVERAGE = 5;
+const REVERSE_CALL_LOOKBACK_MINUTES = 120;
 const DEFAULT_MAX_OPEN_TRADES = 5;
 const MAX_OPEN_TRADES = 100;
 const ALLOWED_FILES = new Map([
@@ -17,6 +18,7 @@ const ALLOWED_FILES = new Map([
 const tradingConfig = {
   mode: "demo",
   enabled: false,
+  strategy: "default",
   direction: "both",
   marginAmount: null,
   marginUnit: "percent",
@@ -41,6 +43,7 @@ function getStatus() {
   return {
     mode: tradingConfig.mode,
     enabled: tradingConfig.enabled,
+    strategy: tradingConfig.strategy,
     direction: tradingConfig.direction,
     marginAmount: tradingConfig.marginAmount,
     marginUnit: tradingConfig.marginUnit,
@@ -57,6 +60,10 @@ function validateConfig(body) {
   }
   if (!["both", "long", "short"].includes(body.direction)) {
     throw new Error("Choose a supported trade direction.");
+  }
+  const strategy = body.strategy ?? "default";
+  if (!["default", "reverse-call"].includes(strategy)) {
+    throw new Error("Choose a supported trading strategy.");
   }
   if (!["percent", "usdt"].includes(body.marginUnit)) {
     throw new Error("Choose percent or USDT for the order margin.");
@@ -87,7 +94,7 @@ function validateConfig(body) {
   if (apiKey.length > 256 || apiSecret.length > 256) {
     throw new Error("The Binance API key or secret is too long.");
   }
-  return { apiKey, apiSecret, marginAmount, maxOpenTrades };
+  return { apiKey, apiSecret, marginAmount, maxOpenTrades, strategy };
 }
 
 function updateConfig(body) {
@@ -106,6 +113,7 @@ function updateConfig(body) {
   }
   tradingConfig.mode = body.mode;
   tradingConfig.enabled = false;
+  tradingConfig.strategy = validated.strategy;
   tradingConfig.direction = body.direction;
   tradingConfig.marginAmount = validated.marginAmount;
   tradingConfig.marginUnit = body.marginUnit;
@@ -271,14 +279,35 @@ async function listPositions() {
   return getOpenPositions(positions);
 }
 
+async function hasRecentClosingPrice(symbol, price) {
+  const now = Date.now();
+  const query = new URLSearchParams({
+    symbol,
+    interval: "1m",
+    startTime: String(now - REVERSE_CALL_LOOKBACK_MINUTES * 60 * 1000),
+    endTime: String(now - 1),
+    limit: String(REVERSE_CALL_LOOKBACK_MINUTES)
+  });
+  const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?${query}`);
+  if (!response.ok) {
+    throw apiError(`Could not verify recent candle history (${response.status}); no order was placed.`, 502);
+  }
+  const candles = await response.json();
+  if (!Array.isArray(candles)) {
+    throw apiError("Binance returned invalid candle history; no order was placed.", 502);
+  }
+  return candles.some((candle) => Number(candle[4]) === price);
+}
+
 function validateSignal(body) {
   const symbol = typeof body.symbol === "string" ? body.symbol : "";
-  const direction = body.direction;
+  const candleDirection = body.direction;
   const signalId = typeof body.signalId === "string" ? body.signalId : "";
   if (!/^[A-Z0-9]{2,20}USDT$/.test(symbol)) throw apiError("Invalid USDT perpetual symbol.");
-  if (!["LONG", "SHORT"].includes(direction)) throw apiError("Invalid signal direction.");
+  if (!["LONG", "SHORT"].includes(candleDirection)) throw apiError("Invalid signal direction.");
   if (!/^[A-Za-z0-9:_-]{1,100}$/.test(signalId)) throw apiError("Invalid signal identifier.");
   if (!tradingConfig.enabled) throw apiError("Automatic trading is disabled in Settings.", 409);
+  const direction = getTradeDirection(candleDirection, tradingConfig.strategy);
   if (tradingConfig.direction !== "both" && tradingConfig.direction.toUpperCase() !== direction) {
     return { symbol, direction, signalId, skipped: true };
   }
@@ -287,6 +316,12 @@ function validateSignal(body) {
     throw apiError("Configure a Binance API key and secret in Settings first.", 409);
   }
   return { symbol, direction, signalId, skipped: false };
+}
+
+function getTradeDirection(candleDirection, strategy) {
+  return strategy === "reverse-call"
+    ? (candleDirection === "LONG" ? "SHORT" : "LONG")
+    : candleDirection;
 }
 
 async function placeSignalOrder(body) {
@@ -335,6 +370,14 @@ async function placeSignalOrder(body) {
     if (!Number.isFinite(currentPrice) || currentPrice <= 0 ||
         !Number.isFinite(availableBalance) || availableBalance <= 0) {
       throw apiError("Binance returned an invalid price or available USDT balance.", 502);
+    }
+    if (tradingConfig.strategy === "reverse-call" && await hasRecentClosingPrice(signal.symbol, currentPrice)) {
+      const result = {
+        status: "recent_close_price",
+        reason: "The current market price appeared as a closing price in the previous 120 minutes."
+      };
+      rememberSignal(signal.signalId, result);
+      return result;
     }
     const margin = tradingConfig.marginUnit === "percent"
       ? availableBalance * tradingConfig.marginAmount / 100
@@ -546,6 +589,7 @@ module.exports = {
   createServer,
   formatQuantity,
   countOpenTrades,
+  getTradeDirection,
   getOpenPositions,
   getStatus,
   hasTradeCapacity,

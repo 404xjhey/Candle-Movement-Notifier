@@ -37,12 +37,16 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
 2. Enter both the API key and secret for the selected Binance environment.
    The password fields are masked. The local server keeps credentials in memory
    only; they are not saved to browser storage and are cleared when it stops.
-3. Choose a trade direction, a per-order margin amount, and **Maximum open
+3. Choose a trading strategy, allowed trade direction, a per-order margin amount, and **Maximum open
    trades** (default 5; configurable from 1 to 100). The cap counts all open
    Binance Futures positions on the selected account, including positions
    opened outside Wickwatch. New orders are rejected when the cap is reached.
    A percentage margin uses available USDT margin; a fixed amount uses USDT.
    Position notional is margin multiplied by **5x leverage**.
+   **Default** follows the candle direction (green = long, red = short).
+   **Reverse Call** takes the opposite side immediately after a qualifying
+   candle closes (green = short, red = long). The trade-direction setting
+   filters the resulting order direction for either strategy.
 4. Save settings, then go to Overview and explicitly press **START TRADING**.
    Saving settings never starts trading. Opening or reloading the dashboard
    stops automatic trading; press START TRADING again when you want to resume.
