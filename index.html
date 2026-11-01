@@ -203,11 +203,12 @@
             <div class="setting-row">
               <div class="setting-copy">
                 <label for="strategy-input">Trading strategy</label>
-                <p>Default follows the candle direction. Reverse Call trades the opposite direction immediately after a qualifying candle closes.</p>
+                <p>Default follows the candle direction. Reverse Call trades the opposite direction at market. Reverse call with limit places an opposite-side limit 2.5% beyond the candle high or low, with a stop-loss at approximately -50% PnL.</p>
               </div>
               <select id="strategy-input" name="strategy" class="settings-select">
                 <option value="default">Default</option>
                 <option value="reverse-call">Reverse Call</option>
+                <option value="reverse-call-limit">Reverse call with limit</option>
               </select>
             </div>
             <div class="setting-row">

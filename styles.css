@@ -198,6 +198,7 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .trade-status { display: block; margin-top: 4px; color: #89958d; font-family: var(--sans); font-size: 8px; letter-spacing: .2px; }
 .trade-status-failed { color: #e58b83; }
 .trade-status-placed { color: var(--green); }
+.trade-status-limit-order-placed { color: var(--green); }
 .empty-state { display: flex; min-height: 268px; flex-direction: column; align-items: center; justify-content: center; padding: 30px 20px; text-align: center; }
 .empty-graphic { display: flex; height: 38px; align-items: center; gap: 8px; margin-bottom: 13px; }
 .empty-line { display: block; width: 22px; height: 1px; background: #334039; }

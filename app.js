@@ -86,7 +86,9 @@ function loadSettings() {
         : DEFAULT_MAX_OPEN_TRADES,
       notifications: saved.notifications === true,
       tradeMode: saved.tradeMode === "live" ? "live" : "demo",
-      strategy: ["default", "reverse-call"].includes(saved.strategy) ? saved.strategy : "default",
+      strategy: ["default", "reverse-call", "reverse-call-limit"].includes(saved.strategy)
+        ? saved.strategy
+        : "default",
       tradeDirection: ["both", "long", "short"].includes(saved.tradeDirection) ? saved.tradeDirection : "both",
       marginAmount: Number.isFinite(Number(saved.marginAmount)) && Number(saved.marginAmount) > 0
         ? Number(saved.marginAmount)
@@ -432,8 +434,11 @@ function handleKline(message) {
 
   const open = Number(candle.o);
   const close = Number(candle.c);
+  const high = Number(candle.h);
+  const low = Number(candle.l);
   const quoteVolume = Number(candle.q);
-  if (![open, close, quoteVolume].every(Number.isFinite) || open <= 0 || close === open) return;
+  if (![open, close, high, low, quoteVolume].every(Number.isFinite) ||
+      open <= 0 || high <= 0 || low <= 0 || high < low || close === open) return;
 
   const movePercent = ((close - open) / open) * 100;
   if (Math.abs(movePercent) <= settings.threshold) return;
@@ -448,6 +453,8 @@ function handleKline(message) {
     symbol: candle.s,
     movePercent,
     direction: movePercent > 0 ? "LONG" : "SHORT",
+    high,
+    low,
     tradeStatus: "not-traded",
     changePercent: tickerChanges.get(candle.s) ?? null,
     openTime: candle.t,
@@ -469,8 +476,10 @@ function getTradeStatusLabel(status) {
     "not-traded": "NOT TRADED",
     submitting: "SENDING ORDER",
     placed: "ORDER PLACED",
+    "limit-order-placed": "LIMIT ORDER PLACED",
     failed: "ORDER FAILED",
     "position-exists": "POSITION ALREADY OPEN",
+    "order-exists": "OPEN ORDER ALREADY EXISTS",
     "limit-reached": "OPEN TRADE LIMIT REACHED",
     "direction-disabled": "DIRECTION DISABLED",
     "recent-close-price": "RECENT CLOSE PRICE",
@@ -641,7 +650,8 @@ async function toggleTradingSession() {
 
 async function executeSignal(alert) {
   if (!settings.tradingEnabled) return;
-  const tradeDirection = settings.strategy === "reverse-call"
+  const isReverseStrategy = settings.strategy === "reverse-call" || settings.strategy === "reverse-call-limit";
+  const tradeDirection = isReverseStrategy
     ? (alert.direction === "LONG" ? "SHORT" : "LONG")
     : alert.direction;
   if (settings.tradeDirection !== "both" && settings.tradeDirection.toUpperCase() !== tradeDirection) {
@@ -678,22 +688,32 @@ async function executeSignal(alert) {
       body: JSON.stringify({
         symbol: alert.symbol,
         direction: alert.direction,
-        signalId: alert.id
+        signalId: alert.id,
+        candleHigh: alert.high,
+        candleLow: alert.low
       })
     });
     alert.tradeStatus = result.status === "placed"
-      ? "placed"
+      ? result.orderType === "LIMIT"
+        ? "limit-order-placed"
+        : "placed"
       : result.status === "position_exists"
         ? "position-exists"
+        : result.status === "order_exists"
+          ? "order-exists"
         : result.status === "limit_reached"
           ? "limit-reached"
           : result.status === "recent_close_price"
             ? "recent-close-price"
             : "direction-disabled";
     if (result.status === "placed") {
-      showToast(`${result.direction || tradeDirection} market order placed for ${alert.symbol} at 5x.`);
+      showToast(result.orderType === "LIMIT"
+        ? `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; stop-loss at ${formatPrice(result.stopLossPrice)} (~-50% PnL at 5x).`
+        : `${result.direction || tradeDirection} market order placed for ${alert.symbol} at 5x.`);
     } else if (result.status === "limit_reached") {
       showToast(`Trade limit reached (${result.openTrades}/${result.limit}). No order was placed for ${alert.symbol}.`);
+    } else if (result.status === "order_exists") {
+      showToast(`Reverse call with limit skipped for ${alert.symbol}: an open order already exists.`);
     } else if (result.status === "recent_close_price") {
       showToast(`Reverse Call skipped for ${alert.symbol}: the current price appeared in the previous 120 minutes.`);
     }
@@ -718,9 +738,10 @@ async function closeTrade(symbol) {
       method: "POST",
       body: JSON.stringify({ symbol })
     });
-    showToast(result.status === "closed"
-      ? `Close order sent for ${symbol}.`
-      : `No open ${symbol} position was found.`);
+    showToast(result.cleanupWarning ||
+      (result.status === "closed"
+        ? `Close order sent for ${symbol}.`
+        : `No open ${symbol} position was found.`));
     await refreshPositions();
   } catch (error) {
     console.error(`Could not close the ${symbol} position.`, error);
