@@ -48,9 +48,12 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    **Reverse Call** takes the opposite side at market after a qualifying
    candle closes (green = short, red = long). **Reverse call with limit** places
    a GTC limit order 2.5% above a green candle's high (short) or 2.5% below a
-   red candle's low (long). It also places a mark-price stop-market order at
-   approximately -50% PnL at 5x leverage (10% adverse price movement from the
-   limit price). Stop-market execution can slip, especially in fast markets.
+   red candle's low (long). After the limit order fills and the position appears
+   on Binance, Wickwatch places a mark-price stop-market order at approximately
+   -50% PnL at 5x leverage (10% adverse price movement from the limit price).
+   Keep the dashboard open and the local server running so Wickwatch can detect
+   fills and place protective stops.
+   Stop-market execution can slip, especially in fast markets.
    The trade-direction setting filters the resulting order direction for every
    strategy.
 4. Save settings, then go to Overview and explicitly press **START TRADING**.
@@ -67,8 +70,8 @@ Futures trading; withdrawals are not needed. Keep keys private and do not expose
 this server beyond the local machine. Live mode can lose funds. Default and
 Reverse Call market trades do not set stop-loss or take-profit orders; monitor
 these positions directly in Binance. Reverse call with limit sets its protective
-stop as described above. Demo trading uses Binance's separate Futures demo API
-and credentials.
+stop after the entry fills as described above. Demo trading uses Binance's
+separate Futures demo API and credentials.
 
 The market scanner uses public live Binance market data even while orders are
 sent to Demo. The local trading server must remain running for automatic orders
