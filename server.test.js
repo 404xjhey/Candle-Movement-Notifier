@@ -6,6 +6,7 @@ const {
   formatPrice,
   formatQuantity,
   getLimitEntryPrice,
+  getRoiTriggerPrice,
   getStopLossPrice,
   getTradeDirection,
   getOpenPositions,
@@ -39,6 +40,13 @@ test("prices reverse-call limit entries from candle extremes and rounds toward t
 test("sets stop triggers at approximately 50% PnL loss using 5x leverage", () => {
   assert.equal(getStopLossPrice("SHORT", 102.5, "0.01"), "112.75");
   assert.equal(getStopLossPrice("LONG", 92.62, "0.01"), "83.36");
+});
+
+test("converts positive and negative ROI thresholds to directional mark-price triggers", () => {
+  assert.equal(getRoiTriggerPrice("LONG", 100, 30, "0.01"), "106.00");
+  assert.equal(getRoiTriggerPrice("LONG", 100, -30, "0.01"), "94.00");
+  assert.equal(getRoiTriggerPrice("SHORT", 100, 30, "0.01"), "94.00");
+  assert.equal(getRoiTriggerPrice("SHORT", 100, -30, "0.01"), "106.00");
 });
 
 test("returns only nonzero positions with a normalized direction", () => {
@@ -77,6 +85,12 @@ test("validates the maximum open trade setting", () => {
   assert.doesNotThrow(() => validateConfig({ ...config, maxOpenTrades: 5 }));
   assert.equal(validateConfig({ ...config, strategy: "reverse-call-limit" }).strategy, "reverse-call-limit");
   assert.equal(validateConfig(config).strategy, "default");
+  assert.equal(validateConfig({ ...config, takeProfitRoi: 30, stopLossRoi: -30 }).takeProfitRoi, 30);
+  assert.equal(validateConfig({ ...config, takeProfitRoi: "", stopLossRoi: null }).stopLossRoi, null);
+  assert.throws(() => validateConfig({ ...config, takeProfitRoi: -30 }), /greater than 0/);
+  assert.throws(() => validateConfig({ ...config, stopLossRoi: 30 }), /less than 0/);
+  assert.throws(() => validateConfig({ ...config, takeProfitRoi: 500 }), /valid price trigger/);
+  assert.throws(() => validateConfig({ ...config, stopLossRoi: -500 }), /valid price trigger/);
 });
 
 test("validates margin and paired API credentials when saving trading settings", () => {
@@ -127,6 +141,8 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.match(pageContent, /Wickwatch/);
   assert.match(pageContent, /id="max-open-trades-input"[^>]*value="5"/);
   assert.match(pageContent, /id="strategy-input"/);
+  assert.match(pageContent, /id="take-profit-roi-input"/);
+  assert.match(pageContent, /id="stop-loss-roi-input"/);
   assert.match(pageContent, /value="reverse-call-limit">Reverse call with limit/);
 
   const rejected = await fetch(`${baseUrl}/api/trading/status`, {
@@ -144,6 +160,8 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
       direction: "both",
       marginAmount: 1,
       marginUnit: "percent",
+      takeProfitRoi: 30,
+      stopLossRoi: -30,
       maxOpenTrades: 5
     })
   });
@@ -151,6 +169,8 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   const savedStatus = await savedConfig.json();
   assert.equal(savedStatus.enabled, false);
   assert.equal(savedStatus.strategy, "reverse-call-limit");
+  assert.equal(savedStatus.takeProfitRoi, 30);
+  assert.equal(savedStatus.stopLossRoi, -30);
   assert.equal(savedStatus.maxOpenTrades, 5);
 
   const startWithoutCredentials = await fetch(`${baseUrl}/api/trading/start`, { method: "POST" });
@@ -169,7 +189,10 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   const originalFetch = global.fetch;
   let submittedOrder;
   const submittedStops = [];
+  const activeAlgoOrders = [];
   let positionIsOpen = false;
+  let positionMarkPrice = 0.00000052;
+  let nextMarketMarkPrice = 0.00000056;
 
   global.fetch = async (input, options) => {
     const url = new URL(typeof input === "string" ? input : input.url);
@@ -185,14 +208,16 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
           positionAmt: "10000000",
           positionSide: "BOTH",
           entryPrice: "0.00000052",
-          markPrice: "0.00000052",
+          markPrice: String(positionMarkPrice),
           unRealizedProfit: "0"
         }]
         : [];
+    } else if (url.pathname === "/fapi/v1/ticker/price") {
+      data = { price: "0.00000052" };
     } else if (url.pathname === "/fapi/v1/openOrders") {
       data = [];
     } else if (url.pathname === "/fapi/v1/openAlgoOrders") {
-      data = [];
+      data = [...activeAlgoOrders];
     } else if (url.pathname === "/fapi/v1/exchangeInfo") {
       data = {
         symbols: [{
@@ -213,10 +238,25 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
     } else if (url.pathname === "/fapi/v1/leverage") {
       data = { leverage: 5 };
     } else if (url.pathname === "/fapi/v1/algoOrder") {
-      submittedStops.push(Object.fromEntries(url.searchParams));
-      data = { algoId: 123 };
+      if (options.method === "DELETE") {
+        const index = activeAlgoOrders.findIndex((order) => String(order.algoId) === url.searchParams.get("algoId"));
+        if (index >= 0) activeAlgoOrders.splice(index, 1);
+        data = {};
+      } else {
+        const submitted = Object.fromEntries(url.searchParams);
+        submitted.algoId = submittedStops.length + 123;
+        submittedStops.push(submitted);
+        activeAlgoOrders.push(submitted);
+        data = { algoId: submitted.algoId };
+      }
     } else if (url.pathname === "/fapi/v1/order") {
       submittedOrder = Object.fromEntries(url.searchParams);
+      if (submittedOrder.reduceOnly === "true") {
+        positionIsOpen = false;
+      } else if (submittedOrder.type === "MARKET") {
+        positionIsOpen = true;
+        positionMarkPrice = nextMarketMarkPrice;
+      }
       data = { orderId: 456 };
     } else {
       throw new Error(`Unexpected Binance request: ${url.pathname}`);
@@ -274,4 +314,96 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal(submittedStops.length, 1);
   assert.equal(submittedStops[0].type, "STOP_MARKET");
   assert.equal(submittedStops[0].triggerPrice, "0.00000057");
+
+  positionIsOpen = false;
+  const orphanCleanup = await fetch(`${baseUrl}/api/trading/positions`);
+  assert.equal(orphanCleanup.status, 200);
+  assert.equal(activeAlgoOrders.length, 0);
+
+  const defaultConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "default",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      takeProfitRoi: 30,
+      stopLossRoi: -30,
+      maxOpenTrades: 5
+    })
+  });
+  assert.equal(defaultConfig.status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+
+  const marketSignal = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "default-roi-exit",
+      candleHigh: 0.0000005,
+      candleLow: 0.0000004
+    })
+  });
+  assert.equal(marketSignal.status, 200);
+  const marketSignalResult = await marketSignal.json();
+  assert.equal(marketSignalResult.status, "placed");
+  assert.equal(submittedOrder.type, "MARKET");
+  assert.equal(marketSignalResult.protectiveOrdersPending, false);
+  assert.deepEqual(marketSignalResult.protectiveOrders, [
+    { type: "TAKE_PROFIT_MARKET", triggerPrice: 0.00000056 },
+    { type: "STOP_MARKET", triggerPrice: 0.00000049 }
+  ]);
+  assert.equal(submittedStops.length, 3);
+  assert.deepEqual(submittedStops.slice(1).map(({ type }) => type), ["TAKE_PROFIT_MARKET", "STOP_MARKET"]);
+  assert.deepEqual(submittedStops.slice(1).map(({ triggerPrice }) => triggerPrice), ["0.00000056", "0.00000049"]);
+  assert.equal(submittedStops.slice(1).every((order) => order.closePosition === "true"), true);
+  assert.equal(submittedStops.slice(1).every((order) => order.workingType === "MARK_PRICE"), true);
+
+  const positionsWithProtection = await fetch(`${baseUrl}/api/trading/positions`);
+  assert.equal(positionsWithProtection.status, 200);
+  assert.equal((await positionsWithProtection.json()).positions.length, 1);
+  assert.equal(activeAlgoOrders.length, 2);
+
+  const stopLossConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "default",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      takeProfitRoi: null,
+      stopLossRoi: -30,
+      maxOpenTrades: 5
+    })
+  });
+  assert.equal(stopLossConfig.status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+  positionIsOpen = false;
+  await fetch(`${baseUrl}/api/trading/positions`);
+  nextMarketMarkPrice = 0.00000048;
+  const stopLossSignal = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "default-roi-stop-loss",
+      candleHigh: 0.0000005,
+      candleLow: 0.0000004
+    })
+  });
+  assert.equal(stopLossSignal.status, 200);
+  const stopLossResult = await stopLossSignal.json();
+  assert.equal(stopLossResult.status, "placed");
+  assert.deepEqual(stopLossResult.protectiveOrders, [
+    { type: "STOP_MARKET", triggerPrice: 0.00000049 }
+  ]);
+  assert.equal(submittedStops.at(-1).type, "STOP_MARKET");
+  assert.equal(submittedStops.at(-1).triggerPrice, "0.00000049");
 });

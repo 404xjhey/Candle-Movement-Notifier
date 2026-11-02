@@ -45,6 +45,13 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    A percentage margin uses available USDT margin; a fixed amount uses USDT.
    Position notional is margin multiplied by **5x leverage**.
    **Default** follows the candle direction (green = long, red = short).
+   Default trades can use optional **Take-profit ROI** and **Stop-loss ROI**
+   settings. Enter a positive percentage for take-profit (for example `30`) and
+   a negative percentage for stop-loss (for example `-30`); leave either blank
+   to disable that order. Wickwatch converts ROI to exchange-hosted mark-price
+   trigger orders at 5x leverage, before fees and funding (30% ROI is about a
+   6% favorable price move). Once placed, Binance keeps these orders active if
+   Wickwatch closes. Triggered market orders can slip.
    **Reverse Call** takes the opposite side at market after a qualifying
    candle closes (green = short, red = long). **Reverse call with limit** places
    a GTC limit order 2.5% above a green candle's high (short) or 2.5% below a
@@ -67,11 +74,11 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
 
 Create separate Demo and Live API keys. Grant only the permissions needed for
 Futures trading; withdrawals are not needed. Keep keys private and do not expose
-this server beyond the local machine. Live mode can lose funds. Default and
-Reverse Call market trades do not set stop-loss or take-profit orders; monitor
-these positions directly in Binance. Reverse call with limit sets its protective
-stop after the entry fills as described above. Demo trading uses Binance's
-separate Futures demo API and credentials.
+this server beyond the local machine. Live mode can lose funds. Reverse Call
+market trades do not set stop-loss or take-profit exits; monitor these positions
+directly in Binance. Reverse call with limit sets its protective stop after the
+entry fills as described above. Demo trading uses Binance's separate Futures
+demo API and credentials.
 
 The market scanner uses public live Binance market data even while orders are
 sent to Demo. The local trading server must remain running for automatic orders
