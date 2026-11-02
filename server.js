@@ -24,6 +24,8 @@ const tradingConfig = {
   direction: "both",
   marginAmount: null,
   marginUnit: "percent",
+  takeProfitRoi: null,
+  stopLossRoi: null,
   maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
   apiKey: "",
   apiSecret: ""
@@ -51,6 +53,8 @@ function getStatus() {
     direction: tradingConfig.direction,
     marginAmount: tradingConfig.marginAmount,
     marginUnit: tradingConfig.marginUnit,
+    takeProfitRoi: tradingConfig.takeProfitRoi,
+    stopLossRoi: tradingConfig.stopLossRoi,
     maxOpenTrades: tradingConfig.maxOpenTrades,
     leverage: LEVERAGE,
     configured: Boolean(tradingConfig.apiKey && tradingConfig.apiSecret),
@@ -81,6 +85,8 @@ function validateConfig(body) {
   if (body.marginUnit === "percent" && marginAmount !== null && marginAmount > 100) {
     throw new Error("Order margin cannot exceed 100% of available margin.");
   }
+  const takeProfitRoi = validateRoiSetting(body.takeProfitRoi, "Take-profit ROI", "positive");
+  const stopLossRoi = validateRoiSetting(body.stopLossRoi, "Stop-loss ROI", "negative");
   const maxOpenTrades = body.maxOpenTrades == null
     ? tradingConfig.maxOpenTrades
     : Number(body.maxOpenTrades);
@@ -98,7 +104,22 @@ function validateConfig(body) {
   if (apiKey.length > 256 || apiSecret.length > 256) {
     throw new Error("The Binance API key or secret is too long.");
   }
-  return { apiKey, apiSecret, marginAmount, maxOpenTrades, strategy };
+  return { apiKey, apiSecret, marginAmount, maxOpenTrades, strategy, takeProfitRoi, stopLossRoi };
+}
+
+function validateRoiSetting(value, label, sign) {
+  if (value === "" || value == null) return null;
+  if (typeof value !== "string" && typeof value !== "number") {
+    throw new Error(`${label} must be a number or blank.`);
+  }
+  const roi = Number(value);
+  if (!Number.isFinite(roi) || (sign === "positive" ? roi <= 0 : roi >= 0)) {
+    throw new Error(`${label} must be ${sign === "positive" ? "greater than 0" : "less than 0"}, or blank.`);
+  }
+  if (Math.abs(roi) >= LEVERAGE * 100) {
+    throw new Error(`${label} must be between -${LEVERAGE * 100}% and ${LEVERAGE * 100}% to produce a valid price trigger.`);
+  }
+  return roi;
 }
 
 function updateConfig(body) {
@@ -112,7 +133,9 @@ function updateConfig(body) {
     tradingConfig.enabled = false;
     exchangeInfoCache = undefined;
   }
-  if (modeChanged || credentialsChanged) pendingProtectiveStops.clear();
+  if (modeChanged || credentialsChanged) {
+    pendingProtectiveStops.clear();
+  }
   tradingGeneration += 1;
   if (validated.apiKey && validated.apiSecret) {
     tradingConfig.apiKey = validated.apiKey;
@@ -124,6 +147,8 @@ function updateConfig(body) {
   tradingConfig.direction = body.direction;
   tradingConfig.marginAmount = validated.marginAmount;
   tradingConfig.marginUnit = body.marginUnit;
+  tradingConfig.takeProfitRoi = validated.takeProfitRoi;
+  tradingConfig.stopLossRoi = validated.stopLossRoi;
   tradingConfig.maxOpenTrades = validated.maxOpenTrades;
   return getStatus();
 }
@@ -269,6 +294,20 @@ function getOpenPositions(positions) {
     });
 }
 
+function getRoiTriggerPrice(direction, entryPrice, roiPercent, tickSize) {
+  if (!["LONG", "SHORT"].includes(direction) ||
+      !Number.isFinite(entryPrice) || entryPrice <= 0 ||
+      !Number.isFinite(roiPercent) || roiPercent === 0) {
+    throw apiError("Cannot calculate a protective order from invalid trade or ROI values.");
+  }
+  const priceMove = roiPercent / (LEVERAGE * 100);
+  const triggerPrice = direction === "LONG"
+    ? entryPrice * (1 + priceMove)
+    : entryPrice * (1 - priceMove);
+  if (triggerPrice <= 0) throw apiError("The configured ROI produces an invalid trigger price.");
+  return formatPrice(triggerPrice, tickSize, direction === "LONG" ? "up" : "down");
+}
+
 function countOpenTrades(openPositions, reservedSymbols) {
   const openPositionSymbols = new Set(openPositions.map((position) => position.symbol));
   const pendingSymbols = new Set(reservedSymbols);
@@ -301,32 +340,41 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
   const openPositionSymbols = new Set(openPositions.map((position) => position.symbol));
   const openEntryIds = new Set(openOrders.map((order) => order.clientOrderId));
   const openAlgoIds = new Set(algoOrders.map((order) => order.clientAlgoId));
+  const installedOrders = [];
   for (const [symbol, protection] of pendingProtectiveStops) {
     if (inFlightProtectiveStops.has(symbol)) continue;
     if (!openPositionSymbols.has(symbol)) {
-      if (!openEntryIds.has(protection.entryClientOrderId) && !inFlightSymbols.has(symbol)) {
+      const awaitingMarketPosition = protection.waitForPosition &&
+        Date.now() - protection.createdAt < 2 * 60 * 1000;
+      if (!openEntryIds.has(protection.entryClientOrderId) &&
+          !inFlightSymbols.has(symbol) && !awaitingMarketPosition) {
         pendingProtectiveStops.delete(symbol);
       }
-      continue;
-    }
-    if (openAlgoIds.has(protection.clientAlgoId)) {
-      pendingProtectiveStops.delete(symbol);
       continue;
     }
 
     inFlightProtectiveStops.add(symbol);
     try {
-      await signedRequest("POST", "/fapi/v1/algoOrder", {
-        algoType: "CONDITIONAL",
-        symbol,
-        side: protection.direction === "LONG" ? "SELL" : "BUY",
-        type: "STOP_MARKET",
-        triggerPrice: protection.triggerPrice,
-        workingType: "MARK_PRICE",
-        closePosition: "true",
-        clientAlgoId: protection.clientAlgoId,
-        ...(protection.positionSide ? { positionSide: protection.positionSide } : {})
-      });
+      const position = openPositions.find((item) => item.symbol === symbol);
+      for (const order of protection.orders) {
+        if (openAlgoIds.has(order.clientAlgoId)) continue;
+        const triggerPrice = order.roiPercent == null
+          ? order.triggerPrice
+          : getRoiTriggerPrice(protection.direction, position.entryPrice, order.roiPercent, protection.tickSize);
+        await signedRequest("POST", "/fapi/v1/algoOrder", {
+          algoType: "CONDITIONAL",
+          symbol,
+          side: protection.direction === "LONG" ? "SELL" : "BUY",
+          type: order.type,
+          triggerPrice,
+          workingType: "MARK_PRICE",
+          closePosition: "true",
+          clientAlgoId: order.clientAlgoId,
+          ...(protection.positionSide ? { positionSide: protection.positionSide } : {})
+        });
+        openAlgoIds.add(order.clientAlgoId);
+        installedOrders.push({ symbol, type: order.type, triggerPrice: Number(triggerPrice) });
+      }
       pendingProtectiveStops.delete(symbol);
     } finally {
       inFlightProtectiveStops.delete(symbol);
@@ -334,12 +382,15 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
   }
 
   for (const order of algoOrders) {
-    if (typeof order.clientAlgoId !== "string" || !order.clientAlgoId.startsWith("ww_sl_")) continue;
-    const entryClientOrderId = `ww_${order.clientAlgoId.slice("ww_sl_".length)}`;
+    if (typeof order.clientAlgoId !== "string" ||
+        (!order.clientAlgoId.startsWith("ww_sl_") && !order.clientAlgoId.startsWith("ww_tp_"))) continue;
+    const prefix = order.clientAlgoId.startsWith("ww_sl_") ? "ww_sl_" : "ww_tp_";
+    const entryClientOrderId = `ww_${order.clientAlgoId.slice(prefix.length)}`;
     if (openPositionSymbols.has(order.symbol) || openEntryIds.has(entryClientOrderId) ||
         inFlightSymbols.has(order.symbol)) continue;
     await signedRequest("DELETE", "/fapi/v1/algoOrder", { algoId: String(order.algoId) });
   }
+  return installedOrders;
 }
 
 async function hasRecentClosingPrice(symbol, price) {
@@ -585,8 +636,8 @@ async function placeSignalOrder(body) {
       });
       pendingProtectiveStops.set(signal.symbol, {
         direction: signal.direction,
-        triggerPrice: stopLossPrice,
-        clientAlgoId,
+        tickSize: priceFilter.tickSize,
+        orders: [{ type: "STOP_MARKET", triggerPrice: stopLossPrice, clientAlgoId }],
         entryClientOrderId: clientOrderId,
         positionSide
       });
@@ -611,12 +662,65 @@ async function placeSignalOrder(body) {
       newClientOrderId: clientOrderId,
       ...(positionSide ? { positionSide } : {})
     });
+    const protectiveOrders = [];
+    if (tradingConfig.strategy === "default") {
+      if (tradingConfig.takeProfitRoi !== null) {
+        protectiveOrders.push({
+          type: "TAKE_PROFIT_MARKET",
+          roiPercent: tradingConfig.takeProfitRoi,
+          clientAlgoId: `ww_tp_${orderHash}`
+        });
+      }
+      if (tradingConfig.stopLossRoi !== null) {
+        protectiveOrders.push({
+          type: "STOP_MARKET",
+          roiPercent: tradingConfig.stopLossRoi,
+          clientAlgoId: `ww_sl_${orderHash}`
+        });
+      }
+    }
+    if (protectiveOrders.length) {
+      pendingProtectiveStops.set(signal.symbol, {
+        direction: signal.direction,
+        tickSize: priceFilter.tickSize,
+        orders: protectiveOrders,
+        entryClientOrderId: clientOrderId,
+        positionSide,
+        waitForPosition: true,
+        createdAt: Date.now()
+      });
+    }
+    let protectionWarning;
+    let activeProtectiveOrders = [];
+    if (protectiveOrders.length) {
+      try {
+        const openPositions = await listPositions();
+        const position = openPositions.find((item) => item.symbol === signal.symbol);
+        if (position) {
+          activeProtectiveOrders = protectiveOrders.map((order) => ({
+            type: order.type,
+            triggerPrice: Number(order.roiPercent == null
+              ? order.triggerPrice
+              : getRoiTriggerPrice(signal.direction, position.entryPrice, order.roiPercent, priceFilter.tickSize))
+          }));
+        }
+        await cleanupOrphanedProtectiveStops(openPositions);
+      } catch (error) {
+        protectionWarning = `Entry order was placed, but protective TP/SL orders could not be confirmed: ${error.message}`;
+      }
+      if (!protectionWarning && pendingProtectiveStops.has(signal.symbol)) {
+        protectionWarning = "Entry order was placed; TP/SL orders are waiting for the open position to appear and will be retried.";
+      }
+    }
     const result = {
       status: "placed",
       direction: signal.direction,
       quantity: numericQuantity,
       leverage: LEVERAGE,
-      orderId: order.orderId
+      orderId: order.orderId,
+      ...(protectiveOrders.length ? { protectiveOrders: activeProtectiveOrders } : {}),
+      ...(protectionWarning ? { protectionWarning } : {}),
+      ...(protectiveOrders.length ? { protectiveOrdersPending: pendingProtectiveStops.has(signal.symbol) } : {})
     };
     rememberSignal(signal.signalId, result);
     return result;
@@ -722,8 +826,8 @@ async function handleApi(request, response, pathname) {
       return;
     }
     const positions = await listPositions();
-    await cleanupOrphanedProtectiveStops(positions);
-    sendJson(response, 200, { positions });
+    const protectionOrders = await cleanupOrphanedProtectiveStops(positions);
+    sendJson(response, 200, { positions, protectionOrders });
     return;
   }
   if (pathname === "/api/trading/signal" && request.method === "POST") {
@@ -785,6 +889,7 @@ module.exports = {
   countOpenTrades,
   getTradeDirection,
   getOpenPositions,
+  getRoiTriggerPrice,
   getStatus,
   hasTradeCapacity,
   formatPrice,

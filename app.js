@@ -35,6 +35,8 @@ const elements = {
   tradeDirectionInput: document.querySelector("#trade-direction-input"),
   marginAmountInput: document.querySelector("#margin-amount-input"),
   marginUnitInput: document.querySelector("#margin-unit-input"),
+  takeProfitRoiInput: document.querySelector("#take-profit-roi-input"),
+  stopLossRoiInput: document.querySelector("#stop-loss-roi-input"),
   tradeModeInput: document.querySelector("#trade-mode-input"),
   tradingSessionButton: document.querySelector("#trading-session-button"),
   tradingSessionStatus: document.querySelector("#trading-session-status"),
@@ -65,6 +67,7 @@ const tickerPrices = new Map();
 let socket;
 let reconnectTimer;
 let subscriptionTimer;
+let positionRefreshTimer;
 let toastTimer;
 let subscriptionIdsAwaitingAck = new Set();
 let allMarketsSubmitted = false;
@@ -94,6 +97,8 @@ function loadSettings() {
         ? Number(saved.marginAmount)
         : "",
       marginUnit: saved.marginUnit === "usdt" ? "usdt" : "percent",
+      takeProfitRoi: loadRoiSetting(saved.takeProfitRoi, "positive"),
+      stopLossRoi: loadRoiSetting(saved.stopLossRoi, "negative"),
       tradingEnabled: false
     };
   } catch (error) {
@@ -108,9 +113,19 @@ function loadSettings() {
       tradeDirection: "both",
       marginAmount: "",
       marginUnit: "percent",
+      takeProfitRoi: "",
+      stopLossRoi: "",
       tradingEnabled: false
     };
   }
+}
+
+function loadRoiSetting(value, sign) {
+  const text = value == null ? "" : String(value).trim();
+  if (!text) return "";
+  const roi = Number(text);
+  if (!Number.isFinite(roi) || (sign === "positive" ? roi <= 0 : roi >= 0)) return "";
+  return roi;
 }
 
 function loadAlerts() {
@@ -201,8 +216,18 @@ function renderSettings() {
   elements.tradeDirectionInput.value = settings.tradeDirection;
   elements.marginAmountInput.value = settings.marginAmount === "" ? "" : String(settings.marginAmount);
   elements.marginUnitInput.value = settings.marginUnit;
+  elements.takeProfitRoiInput.value = settings.takeProfitRoi === "" ? "" : String(settings.takeProfitRoi);
+  elements.stopLossRoiInput.value = settings.stopLossRoi === "" ? "" : String(settings.stopLossRoi);
   elements.tradeModeInput.value = settings.tradeMode;
+  toggleDefaultRoiSettings();
   renderTradingSession();
+}
+
+function toggleDefaultRoiSettings() {
+  const isDefault = elements.strategyInput.value === "default";
+  document.querySelectorAll(".default-roi-setting").forEach((setting) => {
+    setting.hidden = !isDefault;
+  });
 }
 
 function renderTradingSession() {
@@ -534,8 +559,29 @@ async function refreshPositions() {
   const result = await requestTradingApi("/api/trading/positions");
   openPositionCount = result.positions.length;
   positions = new Map(result.positions.map((position) => [position.symbol, position]));
+  if (Array.isArray(result.protectionOrders) && result.protectionOrders.length) {
+    const ordersBySymbol = new Map();
+    for (const order of result.protectionOrders) {
+      const orders = ordersBySymbol.get(order.symbol) || [];
+      orders.push(`${order.type === "TAKE_PROFIT_MARKET" ? "TP" : "SL"} at ${formatPrice(order.triggerPrice)}`);
+      ordersBySymbol.set(order.symbol, orders);
+    }
+    showToast([...ordersBySymbol]
+      .map(([symbol, orders]) => `${symbol}: ${orders.join(" and ")} exchange orders set.`)
+      .join(" "));
+  }
   renderAlerts();
   renderTradingSession();
+}
+
+function startPositionRefresh() {
+  if (positionRefreshTimer) return;
+  positionRefreshTimer = window.setInterval(() => {
+    refreshPositions().catch((error) => {
+      console.error("Could not refresh Binance positions.", error);
+      elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
+    });
+  }, 15000);
 }
 
 async function loadTradingStatus() {
@@ -549,6 +595,8 @@ async function loadTradingStatus() {
     settings.tradeDirection = tradingStatus.direction;
     settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
     settings.marginUnit = tradingStatus.marginUnit;
+    settings.takeProfitRoi = tradingStatus.takeProfitRoi ?? "";
+    settings.stopLossRoi = tradingStatus.stopLossRoi ?? "";
     settings.maxOpenTrades = tradingStatus.maxOpenTrades;
     saveSettings();
     renderSettings();
@@ -559,14 +607,7 @@ async function loadTradingStatus() {
       console.error("Could not load Binance positions.", error);
       elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
     }
-    if (tradingStatus.configured) {
-      window.setInterval(() => {
-        refreshPositions().catch((error) => {
-          console.error("Could not refresh Binance positions.", error);
-          elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
-        });
-      }, 15000);
-    }
+    if (tradingStatus.configured) startPositionRefresh();
   } catch (error) {
     tradingServiceAvailable = false;
     settings.tradingEnabled = false;
@@ -629,6 +670,8 @@ async function toggleTradingSession() {
     settings.tradeDirection = tradingStatus.direction;
     settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
     settings.marginUnit = tradingStatus.marginUnit;
+    settings.takeProfitRoi = tradingStatus.takeProfitRoi ?? "";
+    settings.stopLossRoi = tradingStatus.stopLossRoi ?? "";
     saveSettings();
     showToast(`Trading started in ${tradingStatus.mode.toUpperCase()} mode. New qualifying candles can place orders.`);
   } catch (error) {
@@ -707,9 +750,22 @@ async function executeSignal(alert) {
             ? "recent-close-price"
             : "direction-disabled";
     if (result.status === "placed") {
-      showToast(result.orderType === "LIMIT"
-        ? `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; a stop-loss at ${formatPrice(result.stopLossPrice)} will be set after it fills.`
-        : `${result.direction || tradeDirection} market order placed for ${alert.symbol} at 5x.`);
+      let message;
+      if (result.protectionWarning) {
+        message = result.protectionWarning;
+      } else if (result.orderType === "LIMIT") {
+        message = `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; a stop-loss at ${formatPrice(result.stopLossPrice)} will be set after it fills.`;
+      } else if (result.protectiveOrdersPending) {
+        message = `${result.direction || tradeDirection} market order placed for ${alert.symbol}; TP/SL orders are waiting for the position to appear.`;
+      } else if (result.protectiveOrders?.length) {
+        const orderSummary = result.protectiveOrders
+          .map((order) => `${order.type === "TAKE_PROFIT_MARKET" ? "TP" : "SL"} at ${formatPrice(order.triggerPrice)}`)
+          .join(" and ");
+        message = `${result.direction || tradeDirection} market order placed for ${alert.symbol}; ${orderSummary} exchange orders set.`;
+      } else {
+        message = `${result.direction || tradeDirection} market order placed for ${alert.symbol} at 5x.`;
+      }
+      showToast(message);
     } else if (result.status === "limit_reached") {
       showToast(`Trade limit reached (${result.openTrades}/${result.limit}). No order was placed for ${alert.symbol}.`);
     } else if (result.status === "order_exists") {
@@ -960,6 +1016,22 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     elements.marginAmountInput.reportValidity();
     return;
   }
+  const takeProfitText = elements.takeProfitRoiInput.value.trim();
+  const takeProfitRoi = takeProfitText ? Number(takeProfitText) : null;
+  if (takeProfitRoi !== null &&
+      (!Number.isFinite(takeProfitRoi) || takeProfitRoi <= 0 || takeProfitRoi >= 500)) {
+    elements.takeProfitRoiInput.setCustomValidity("Enter a take-profit ROI greater than 0% and less than 500%, or leave it blank.");
+    elements.takeProfitRoiInput.reportValidity();
+    return;
+  }
+  const stopLossText = elements.stopLossRoiInput.value.trim();
+  const stopLossRoi = stopLossText ? Number(stopLossText) : null;
+  if (stopLossRoi !== null &&
+      (!Number.isFinite(stopLossRoi) || stopLossRoi >= 0 || stopLossRoi <= -500)) {
+    elements.stopLossRoiInput.setCustomValidity("Enter a stop-loss ROI less than 0% and greater than -500%, or leave it blank.");
+    elements.stopLossRoiInput.reportValidity();
+    return;
+  }
   const apiKey = elements.apiKeyInput.value.trim();
   const apiSecret = elements.apiSecretInput.value.trim();
   if (Boolean(apiKey) !== Boolean(apiSecret)) {
@@ -1007,6 +1079,8 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     tradeDirection: elements.tradeDirectionInput.value,
     marginAmount: marginAmount ?? "",
     marginUnit,
+    takeProfitRoi: takeProfitRoi ?? "",
+    stopLossRoi: stopLossRoi ?? "",
     tradingEnabled: false
   };
   if (saveSettings()) {
@@ -1021,6 +1095,8 @@ elements.settingsForm.addEventListener("submit", async (event) => {
         direction: settings.tradeDirection,
         marginAmount,
         marginUnit,
+        takeProfitRoi,
+        stopLossRoi,
         maxOpenTrades,
         liveConfirmed: tradeMode === "live" && (liveNeedsConfirmation || tradingStatus?.mode === "live")
       };
@@ -1033,6 +1109,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
         body: JSON.stringify(tradingPayload)
       });
       tradingServiceAvailable = true;
+      if (tradingStatus.configured) startPositionRefresh();
       settings.tradingEnabled = false;
       elements.apiKeyInput.value = "";
       elements.apiSecretInput.value = "";
@@ -1061,6 +1138,8 @@ elements.settingsForm.addEventListener("submit", async (event) => {
         settings.tradeDirection = tradingStatus.direction;
         settings.marginAmount = tradingStatus.marginAmount ?? settings.marginAmount;
         settings.marginUnit = tradingStatus.marginUnit;
+        settings.takeProfitRoi = tradingStatus.takeProfitRoi ?? "";
+        settings.stopLossRoi = tradingStatus.stopLossRoi ?? "";
         settings.maxOpenTrades = tradingStatus.maxOpenTrades;
         saveSettings();
       } catch (statusError) {
@@ -1097,6 +1176,15 @@ elements.marginAmountInput.addEventListener("input", () => {
   elements.marginAmountInput.setCustomValidity("");
   elements.settingsFeedback.textContent = "";
 });
+
+for (const input of [elements.takeProfitRoiInput, elements.stopLossRoiInput]) {
+  input.addEventListener("input", () => {
+    input.setCustomValidity("");
+    elements.settingsFeedback.textContent = "";
+  });
+}
+
+elements.strategyInput.addEventListener("change", toggleDefaultRoiSettings);
 
 for (const input of [
   elements.strategyInput,

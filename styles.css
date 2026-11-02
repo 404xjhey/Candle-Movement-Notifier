@@ -231,6 +231,7 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .range-symbol i, .range-symbol b { position: absolute; top: 9px; left: 17px; width: 1px; height: 5px; background: var(--accent); }
 .range-symbol b { top: 22px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px; }
+.setting-row[hidden], .setting-note[hidden] { display: none; }
 .range-setting { padding-bottom: 15px; }
 .alert-limit-setting { border-top: 1px solid var(--border-subtle); }
 .setting-copy label { color: #dae2dc; font-size: 12px; font-weight: 600; }
