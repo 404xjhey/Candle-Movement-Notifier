@@ -708,7 +708,7 @@ async function executeSignal(alert) {
             : "direction-disabled";
     if (result.status === "placed") {
       showToast(result.orderType === "LIMIT"
-        ? `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; stop-loss at ${formatPrice(result.stopLossPrice)} (~-50% PnL at 5x).`
+        ? `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; a stop-loss at ${formatPrice(result.stopLossPrice)} will be set after it fills.`
         : `${result.direction || tradeDirection} market order placed for ${alert.symbol} at 5x.`);
     } else if (result.status === "limit_reached") {
       showToast(`Trade limit reached (${result.openTrades}/${result.limit}). No order was placed for ${alert.symbol}.`);
@@ -718,7 +718,12 @@ async function executeSignal(alert) {
       showToast(`Reverse Call skipped for ${alert.symbol}: the current price appeared in the previous 120 minutes.`);
     }
     saveAlerts();
-    await refreshPositions();
+    try {
+      await refreshPositions();
+    } catch (error) {
+      console.error(`Could not refresh positions after placing the ${tradeDirection} order for ${alert.symbol}.`, error);
+      elements.credentialStatus.textContent = `Position refresh failed: ${error.message}`;
+    }
   } catch (error) {
     alert.tradeStatus = "failed";
     alert.tradeError = error.message;

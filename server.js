@@ -4,7 +4,7 @@ const http = require("node:http");
 const path = require("node:path");
 
 const ROOT = __dirname;
-const DEFAULT_PORT = 8000;
+const DEFAULT_PORT = 5500;
 const LEVERAGE = 5;
 const REVERSE_CALL_LIMIT_OFFSET_PERCENT = 2.5;
 const STOP_LOSS_PNL_PERCENT = 50;
@@ -32,6 +32,8 @@ const processedSignals = new Map();
 const inFlightSignals = new Set();
 const inFlightSymbols = new Set();
 const inFlightClosures = new Set();
+const pendingProtectiveStops = new Map();
+const inFlightProtectiveStops = new Set();
 let tradingGeneration = 0;
 let exchangeInfoCache;
 
@@ -102,12 +104,15 @@ function validateConfig(body) {
 function updateConfig(body) {
   const validated = validateConfig(body);
   const modeChanged = tradingConfig.mode !== body.mode;
+  const credentialsChanged = Boolean(validated.apiKey && validated.apiSecret) &&
+    (validated.apiKey !== tradingConfig.apiKey || validated.apiSecret !== tradingConfig.apiSecret);
   if (modeChanged) {
     tradingConfig.apiKey = "";
     tradingConfig.apiSecret = "";
     tradingConfig.enabled = false;
     exchangeInfoCache = undefined;
   }
+  if (modeChanged || credentialsChanged) pendingProtectiveStops.clear();
   tradingGeneration += 1;
   if (validated.apiKey && validated.apiSecret) {
     tradingConfig.apiKey = validated.apiKey;
@@ -295,6 +300,39 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
   if (!Array.isArray(algoOrders)) throw apiError("Binance returned invalid conditional order data.", 502);
   const openPositionSymbols = new Set(openPositions.map((position) => position.symbol));
   const openEntryIds = new Set(openOrders.map((order) => order.clientOrderId));
+  const openAlgoIds = new Set(algoOrders.map((order) => order.clientAlgoId));
+  for (const [symbol, protection] of pendingProtectiveStops) {
+    if (inFlightProtectiveStops.has(symbol)) continue;
+    if (!openPositionSymbols.has(symbol)) {
+      if (!openEntryIds.has(protection.entryClientOrderId) && !inFlightSymbols.has(symbol)) {
+        pendingProtectiveStops.delete(symbol);
+      }
+      continue;
+    }
+    if (openAlgoIds.has(protection.clientAlgoId)) {
+      pendingProtectiveStops.delete(symbol);
+      continue;
+    }
+
+    inFlightProtectiveStops.add(symbol);
+    try {
+      await signedRequest("POST", "/fapi/v1/algoOrder", {
+        algoType: "CONDITIONAL",
+        symbol,
+        side: protection.direction === "LONG" ? "SELL" : "BUY",
+        type: "STOP_MARKET",
+        triggerPrice: protection.triggerPrice,
+        workingType: "MARK_PRICE",
+        closePosition: "true",
+        clientAlgoId: protection.clientAlgoId,
+        ...(protection.positionSide ? { positionSide: protection.positionSide } : {})
+      });
+      pendingProtectiveStops.delete(symbol);
+    } finally {
+      inFlightProtectiveStops.delete(symbol);
+    }
+  }
+
   for (const order of algoOrders) {
     if (typeof order.clientAlgoId !== "string" || !order.clientAlgoId.startsWith("ww_sl_")) continue;
     const entryClientOrderId = `ww_${order.clientAlgoId.slice("ww_sl_".length)}`;
@@ -476,9 +514,10 @@ async function placeSignalOrder(body) {
     if (!quantityFilter || (usesLimitEntry && (!limitQuantityFilter || !priceFilter))) {
       throw apiError("Binance did not provide the required quantity or price filters for this contract.", 502);
     }
-    const entryPrice = usesLimitEntry
-      ? Number(getLimitEntryPrice(signal.candleDirection, signal.candleHigh, signal.candleLow, priceFilter.tickSize))
-      : currentPrice;
+    const entryPriceText = usesLimitEntry
+      ? getLimitEntryPrice(signal.candleDirection, signal.candleHigh, signal.candleLow, priceFilter.tickSize)
+      : null;
+    const entryPrice = usesLimitEntry ? Number(entryPriceText) : currentPrice;
     const orderQuantityFilter = usesLimitEntry ? limitQuantityFilter : quantityFilter;
     const quantity = formatQuantity((margin * LEVERAGE) / entryPrice, orderQuantityFilter.stepSize);
     const numericQuantity = Number(quantity);
@@ -531,51 +570,26 @@ async function placeSignalOrder(body) {
     if (usesLimitEntry) {
       const stopLossPrice = getStopLossPrice(signal.direction, entryPrice, priceFilter.tickSize);
       const clientAlgoId = `ww_sl_${orderHash}`;
-      const stopOrder = await signedRequest("POST", "/fapi/v1/algoOrder", {
-        algoType: "CONDITIONAL",
-        symbol: signal.symbol,
-        side: signal.direction === "LONG" ? "SELL" : "BUY",
-        type: "STOP_MARKET",
-        triggerPrice: stopLossPrice,
-        workingType: "MARK_PRICE",
-        closePosition: "true",
-        clientAlgoId,
-        ...(positionSide ? { positionSide } : {})
-      });
       if (!tradingConfig.enabled) {
-        try {
-          await signedRequest("DELETE", "/fapi/v1/algoOrder", { clientAlgoId });
-        } catch (error) {
-          throw apiError(
-            `Trading was stopped before the limit order was sent, but its protective stop could not be canceled: ${error.message}`,
-            502
-          );
-        }
         throw apiError("Automatic trading was disabled before the limit order could be sent.", 409);
       }
-      let order;
-      try {
-        order = await signedRequest("POST", "/fapi/v1/order", {
-          symbol: signal.symbol,
-          side: signal.direction === "LONG" ? "BUY" : "SELL",
-          type: "LIMIT",
-          timeInForce: "GTC",
-          quantity,
-          price: String(entryPrice),
-          newClientOrderId: clientOrderId,
-          ...(positionSide ? { positionSide } : {})
-        });
-      } catch (error) {
-        try {
-          await signedRequest("DELETE", "/fapi/v1/algoOrder", { clientAlgoId });
-        } catch (cancelError) {
-          throw apiError(
-            `${error.message} The protective stop could not be canceled (${cancelError.message}); verify open Binance orders.`,
-            502
-          );
-        }
-        throw error;
-      }
+      const order = await signedRequest("POST", "/fapi/v1/order", {
+        symbol: signal.symbol,
+        side: signal.direction === "LONG" ? "BUY" : "SELL",
+        type: "LIMIT",
+        timeInForce: "GTC",
+        quantity,
+        price: entryPriceText,
+        newClientOrderId: clientOrderId,
+        ...(positionSide ? { positionSide } : {})
+      });
+      pendingProtectiveStops.set(signal.symbol, {
+        direction: signal.direction,
+        triggerPrice: stopLossPrice,
+        clientAlgoId,
+        entryClientOrderId: clientOrderId,
+        positionSide
+      });
       const result = {
         status: "placed",
         orderType: "LIMIT",
@@ -584,8 +598,7 @@ async function placeSignalOrder(body) {
         price: entryPrice,
         stopLossPrice: Number(stopLossPrice),
         leverage: LEVERAGE,
-        orderId: order.orderId,
-        stopOrderId: stopOrder.algoId
+        orderId: order.orderId
       };
       rememberSignal(signal.signalId, result);
       return result;
@@ -699,6 +712,7 @@ async function handleApi(request, response, pathname) {
     tradingConfig.apiKey = "";
     tradingConfig.apiSecret = "";
     tradingConfig.enabled = false;
+    pendingProtectiveStops.clear();
     sendJson(response, 200, getStatus());
     return;
   }

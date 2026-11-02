@@ -160,3 +160,118 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.equal(stopped.status, 200);
   assert.equal((await stopped.json()).enabled, false);
 });
+
+test("submits small limit prices as tick-formatted decimals", async (context) => {
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const originalFetch = global.fetch;
+  let submittedOrder;
+  const submittedStops = [];
+  let positionIsOpen = false;
+
+  global.fetch = async (input, options) => {
+    const url = new URL(typeof input === "string" ? input : input.url);
+    if (url.hostname === "127.0.0.1") return originalFetch(input, options);
+
+    let data;
+    if (url.pathname === "/fapi/v3/account") {
+      data = { assets: [{ asset: "USDT", availableBalance: "100" }] };
+    } else if (url.pathname === "/fapi/v3/positionRisk") {
+      data = positionIsOpen
+        ? [{
+          symbol: "TESTUSDT",
+          positionAmt: "10000000",
+          positionSide: "BOTH",
+          entryPrice: "0.00000052",
+          markPrice: "0.00000052",
+          unRealizedProfit: "0"
+        }]
+        : [];
+    } else if (url.pathname === "/fapi/v1/openOrders") {
+      data = [];
+    } else if (url.pathname === "/fapi/v1/openAlgoOrders") {
+      data = [];
+    } else if (url.pathname === "/fapi/v1/exchangeInfo") {
+      data = {
+        symbols: [{
+          symbol: "TESTUSDT",
+          status: "TRADING",
+          contractType: "PERPETUAL",
+          quoteAsset: "USDT",
+          filters: [
+            { filterType: "LOT_SIZE", minQty: "1", maxQty: "1000000000", stepSize: "1" },
+            { filterType: "MARKET_LOT_SIZE", minQty: "1", maxQty: "1000000000", stepSize: "1" },
+            { filterType: "PRICE_FILTER", tickSize: "0.00000001" },
+            { filterType: "MIN_NOTIONAL", notional: "5" }
+          ]
+        }]
+      };
+    } else if (url.pathname === "/fapi/v1/positionSide/dual") {
+      data = { dualSidePosition: false };
+    } else if (url.pathname === "/fapi/v1/leverage") {
+      data = { leverage: 5 };
+    } else if (url.pathname === "/fapi/v1/algoOrder") {
+      submittedStops.push(Object.fromEntries(url.searchParams));
+      data = { algoId: 123 };
+    } else if (url.pathname === "/fapi/v1/order") {
+      submittedOrder = Object.fromEntries(url.searchParams);
+      data = { orderId: 456 };
+    } else {
+      throw new Error(`Unexpected Binance request: ${url.pathname}`);
+    }
+
+    return { ok: true, status: 200, json: async () => data };
+  };
+
+  context.after(async () => {
+    global.fetch = originalFetch;
+    await new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  });
+
+  const savedConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "reverse-call-limit",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      maxOpenTrades: 5,
+      apiKey: "test-key",
+      apiSecret: "test-secret"
+    })
+  });
+  assert.equal(savedConfig.status, 200);
+
+  const started = await fetch(`${baseUrl}/api/trading/start`, { method: "POST" });
+  assert.equal(started.status, 200);
+
+  const response = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "small-limit-price",
+      candleHigh: 0.0000005,
+      candleLow: 0.0000004
+    })
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).status, "placed");
+  assert.equal(submittedOrder.type, "LIMIT");
+  assert.equal(submittedOrder.price, "0.00000052");
+  assert.equal(submittedStops.length, 0);
+
+  positionIsOpen = true;
+  const positionsResponse = await fetch(`${baseUrl}/api/trading/positions`);
+  assert.equal(positionsResponse.status, 200);
+  assert.equal(submittedStops.length, 1);
+  assert.equal(submittedStops[0].type, "STOP_MARKET");
+  assert.equal(submittedStops[0].triggerPrice, "0.00000057");
+});
