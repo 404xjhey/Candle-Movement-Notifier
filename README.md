@@ -26,6 +26,10 @@ static web server when using trading.
 - Shows the move, 24-hour change, close price, directional PnL from the signal
   close, candle volume, signal bias, close time, trade status, and a per-row
   CLOSE button when a position is open.
+- Removes a token's alert from Latest Alerts after a previously observed
+  Binance position for that token is closed. This is detected on the next
+  successful position refresh (about every 15 seconds while the dashboard is
+  open).
 - Keeps the configured number of recent alerts (1–500) and supports CSV export.
 - Saves scanner preferences and alert history in browser local storage.
 
@@ -51,7 +55,10 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    to disable that order. Wickwatch converts ROI to exchange-hosted mark-price
    trigger orders at 5x leverage, before fees and funding (30% ROI is about a
    6% favorable price move). Once placed, Binance keeps these orders active if
-   Wickwatch closes. Triggered market orders can slip.
+   Wickwatch closes. If a threshold is already reached before its order can be
+   placed, Wickwatch closes the position immediately; rejection of one
+   protective order does not prevent attempting the other. Triggered market
+   orders can slip.
    **Reverse Call** takes the opposite side at market after a qualifying
    candle closes (green = short, red = long). **Reverse call with limit** places
    a GTC limit order 2.5% above a green candle's high (short) or 2.5% below a

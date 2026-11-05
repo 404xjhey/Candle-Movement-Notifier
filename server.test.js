@@ -192,7 +192,8 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   const activeAlgoOrders = [];
   let positionIsOpen = false;
   let positionMarkPrice = 0.00000052;
-  let nextMarketMarkPrice = 0.00000056;
+  let nextMarketMarkPrice = 0.00000053;
+  let rejectTakeProfitOnce = false;
 
   global.fetch = async (input, options) => {
     const url = new URL(typeof input === "string" ? input : input.url);
@@ -244,6 +245,14 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
         data = {};
       } else {
         const submitted = Object.fromEntries(url.searchParams);
+        if (rejectTakeProfitOnce && submitted.type === "TAKE_PROFIT_MARKET") {
+          rejectTakeProfitOnce = false;
+          return {
+            ok: false,
+            status: 400,
+            json: async () => ({ msg: "Order would immediately trigger", code: -2021 })
+          };
+        }
         submitted.algoId = submittedStops.length + 123;
         submittedStops.push(submitted);
         activeAlgoOrders.push(submitted);
@@ -386,7 +395,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
   positionIsOpen = false;
   await fetch(`${baseUrl}/api/trading/positions`);
-  nextMarketMarkPrice = 0.00000048;
+  nextMarketMarkPrice = 0.00000052;
   const stopLossSignal = await fetch(`${baseUrl}/api/trading/signal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -406,4 +415,70 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   ]);
   assert.equal(submittedStops.at(-1).type, "STOP_MARKET");
   assert.equal(submittedStops.at(-1).triggerPrice, "0.00000049");
+
+  positionIsOpen = false;
+  await fetch(`${baseUrl}/api/trading/positions`);
+  const bothOrdersConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "default",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      takeProfitRoi: 30,
+      stopLossRoi: -30,
+      maxOpenTrades: 5
+    })
+  });
+  assert.equal(bothOrdersConfig.status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+  rejectTakeProfitOnce = true;
+  const partiallyProtectedSignal = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "default-roi-tp-retry",
+      candleHigh: 0.0000005,
+      candleLow: 0.0000004
+    })
+  });
+  assert.equal(partiallyProtectedSignal.status, 200);
+  const partialResult = await partiallyProtectedSignal.json();
+  assert.equal(partialResult.protectiveOrdersPending, true);
+  assert.match(partialResult.protectionWarning, /TAKE_PROFIT_MARKET.*immediately trigger/);
+  assert.equal(submittedStops.at(-1).type, "STOP_MARKET");
+
+  const retriedOrdersResponse = await fetch(`${baseUrl}/api/trading/positions`);
+  assert.equal(retriedOrdersResponse.status, 200);
+  const retriedOrders = await retriedOrdersResponse.json();
+  assert.equal(retriedOrders.protectionOrders.length, 1);
+  assert.equal(retriedOrders.protectionOrders[0].type, "TAKE_PROFIT_MARKET");
+  assert.equal(activeAlgoOrders.length, 2);
+
+  positionIsOpen = false;
+  await fetch(`${baseUrl}/api/trading/positions`);
+  nextMarketMarkPrice = 0.00000057;
+  const alreadyReachedSignal = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "default-roi-tp-already-reached",
+      candleHigh: 0.0000005,
+      candleLow: 0.0000004
+    })
+  });
+  assert.equal(alreadyReachedSignal.status, 200);
+  const alreadyReachedResult = await alreadyReachedSignal.json();
+  assert.equal(alreadyReachedResult.status, "placed");
+  assert.ok(alreadyReachedResult.protectionExit, JSON.stringify(alreadyReachedResult));
+  assert.equal(alreadyReachedResult.protectionExit.reason, "Take-profit");
+  assert.equal(alreadyReachedResult.protectionExit.roi > 30, true);
+  assert.equal(submittedOrder.reduceOnly, "true");
+  assert.equal(positionIsOpen, false);
 });

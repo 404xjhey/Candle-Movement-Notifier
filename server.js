@@ -308,6 +308,17 @@ function getRoiTriggerPrice(direction, entryPrice, roiPercent, tickSize) {
   return formatPrice(triggerPrice, tickSize, direction === "LONG" ? "up" : "down");
 }
 
+function getTradeRoiPercent(position) {
+  if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0 ||
+      !Number.isFinite(position.markPrice) || position.markPrice <= 0 ||
+      !["LONG", "SHORT"].includes(position.direction)) {
+    throw apiError("Binance returned an invalid entry or mark price for an open position.", 502);
+  }
+  const directionMultiplier = position.direction === "LONG" ? 1 : -1;
+  return ((position.markPrice - position.entryPrice) / position.entryPrice) *
+    directionMultiplier * LEVERAGE * 100;
+}
+
 function countOpenTrades(openPositions, reservedSymbols) {
   const openPositionSymbols = new Set(openPositions.map((position) => position.symbol));
   const pendingSymbols = new Set(reservedSymbols);
@@ -341,6 +352,8 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
   const openEntryIds = new Set(openOrders.map((order) => order.clientOrderId));
   const openAlgoIds = new Set(algoOrders.map((order) => order.clientAlgoId));
   const installedOrders = [];
+  const closedAtRoi = [];
+  const protectionWarnings = [];
   for (const [symbol, protection] of pendingProtectiveStops) {
     if (inFlightProtectiveStops.has(symbol)) continue;
     if (!openPositionSymbols.has(symbol)) {
@@ -356,26 +369,54 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
     inFlightProtectiveStops.add(symbol);
     try {
       const position = openPositions.find((item) => item.symbol === symbol);
+      const currentRoi = protection.waitForPosition ? getTradeRoiPercent(position) : null;
+      const reachedOrder = protection.orders.find((order) =>
+        order.roiPercent != null &&
+        (order.roiPercent > 0 ? currentRoi >= order.roiPercent : currentRoi <= order.roiPercent)
+      );
+      if (reachedOrder) {
+        const closeResult = await closePosition(symbol, { allowEntryInFlight: true });
+        pendingProtectiveStops.delete(symbol);
+        closedAtRoi.push({
+          symbol,
+          reason: reachedOrder.type === "TAKE_PROFIT_MARKET" ? "Take-profit" : "Stop-loss",
+          roi: currentRoi,
+          cleanupWarning: closeResult.cleanupWarning
+        });
+        continue;
+      }
+
+      let allOrdersInstalled = true;
       for (const order of protection.orders) {
         if (openAlgoIds.has(order.clientAlgoId)) continue;
         const triggerPrice = order.roiPercent == null
           ? order.triggerPrice
           : getRoiTriggerPrice(protection.direction, position.entryPrice, order.roiPercent, protection.tickSize);
-        await signedRequest("POST", "/fapi/v1/algoOrder", {
-          algoType: "CONDITIONAL",
-          symbol,
-          side: protection.direction === "LONG" ? "SELL" : "BUY",
-          type: order.type,
-          triggerPrice,
-          workingType: "MARK_PRICE",
-          closePosition: "true",
-          clientAlgoId: order.clientAlgoId,
-          ...(protection.positionSide ? { positionSide: protection.positionSide } : {})
-        });
-        openAlgoIds.add(order.clientAlgoId);
-        installedOrders.push({ symbol, type: order.type, triggerPrice: Number(triggerPrice) });
+        try {
+          await signedRequest("POST", "/fapi/v1/algoOrder", {
+            algoType: "CONDITIONAL",
+            symbol,
+            side: protection.direction === "LONG" ? "SELL" : "BUY",
+            type: order.type,
+            triggerPrice,
+            workingType: "MARK_PRICE",
+            closePosition: "true",
+            clientAlgoId: order.clientAlgoId,
+            ...(protection.positionSide ? { positionSide: protection.positionSide } : {})
+          });
+          openAlgoIds.add(order.clientAlgoId);
+          installedOrders.push({ symbol, type: order.type, triggerPrice: Number(triggerPrice) });
+          if (protection.lastErrors) delete protection.lastErrors[order.clientAlgoId];
+        } catch (error) {
+          allOrdersInstalled = false;
+          protection.lastErrors ||= {};
+          if (protection.lastErrors[order.clientAlgoId] !== error.message) {
+            protectionWarnings.push({ symbol, type: order.type, message: error.message });
+          }
+          protection.lastErrors[order.clientAlgoId] = error.message;
+        }
       }
-      pendingProtectiveStops.delete(symbol);
+      if (allOrdersInstalled) pendingProtectiveStops.delete(symbol);
     } finally {
       inFlightProtectiveStops.delete(symbol);
     }
@@ -390,7 +431,7 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
         inFlightSymbols.has(order.symbol)) continue;
     await signedRequest("DELETE", "/fapi/v1/algoOrder", { algoId: String(order.algoId) });
   }
-  return installedOrders;
+  return { installedOrders, closedAtRoi, protectionWarnings };
 }
 
 async function hasRecentClosingPrice(symbol, price) {
@@ -692,11 +733,21 @@ async function placeSignalOrder(body) {
     }
     let protectionWarning;
     let activeProtectiveOrders = [];
+    let protectionExit;
+    let protectionWarnings = [];
     if (protectiveOrders.length) {
       try {
         const openPositions = await listPositions();
         const position = openPositions.find((item) => item.symbol === signal.symbol);
-        if (position) {
+        const protectionResult = await cleanupOrphanedProtectiveStops(openPositions);
+        activeProtectiveOrders = protectionResult.installedOrders
+          .filter((order) => order.symbol === signal.symbol)
+          .map(({ type, triggerPrice }) => ({ type, triggerPrice }));
+        protectionExit = protectionResult.closedAtRoi.find((exit) => exit.symbol === signal.symbol);
+        protectionWarnings = protectionResult.protectionWarnings
+          .filter((warning) => warning.symbol === signal.symbol);
+        if (position && !protectionResult.installedOrders.some((order) => order.symbol === signal.symbol) &&
+            !protectionExit && !pendingProtectiveStops.has(signal.symbol)) {
           activeProtectiveOrders = protectiveOrders.map((order) => ({
             type: order.type,
             triggerPrice: Number(order.roiPercent == null
@@ -704,9 +755,13 @@ async function placeSignalOrder(body) {
               : getRoiTriggerPrice(signal.direction, position.entryPrice, order.roiPercent, priceFilter.tickSize))
           }));
         }
-        await cleanupOrphanedProtectiveStops(openPositions);
       } catch (error) {
         protectionWarning = `Entry order was placed, but protective TP/SL orders could not be confirmed: ${error.message}`;
+      }
+      if (!protectionWarning && protectionWarnings.length) {
+        protectionWarning = `Entry was placed, but Binance rejected protective order(s): ${protectionWarnings
+          .map(({ type, message }) => `${type}: ${message}`)
+          .join("; ")}`;
       }
       if (!protectionWarning && pendingProtectiveStops.has(signal.symbol)) {
         protectionWarning = "Entry order was placed; TP/SL orders are waiting for the open position to appear and will be retried.";
@@ -719,6 +774,8 @@ async function placeSignalOrder(body) {
       leverage: LEVERAGE,
       orderId: order.orderId,
       ...(protectiveOrders.length ? { protectiveOrders: activeProtectiveOrders } : {}),
+      ...(protectionExit ? { protectionExit } : {}),
+      ...(protectionWarnings.length ? { protectionWarnings } : {}),
       ...(protectionWarning ? { protectionWarning } : {}),
       ...(protectiveOrders.length ? { protectiveOrdersPending: pendingProtectiveStops.has(signal.symbol) } : {})
     };
@@ -740,11 +797,13 @@ function rememberSignal(signalId, result) {
   }
 }
 
-async function closePosition(symbol) {
+async function closePosition(symbol, { allowEntryInFlight = false } = {}) {
   if (typeof symbol !== "string" || !/^[A-Z0-9]{2,20}USDT$/.test(symbol)) {
     throw apiError("Invalid USDT perpetual symbol.");
   }
-  if (inFlightSymbols.has(symbol)) throw apiError("An entry order for this contract is being processed.", 409);
+  if (!allowEntryInFlight && inFlightSymbols.has(symbol)) {
+    throw apiError("An entry order for this contract is being processed.", 409);
+  }
   if (inFlightClosures.has(symbol)) throw apiError("A close order for this contract is already being processed.", 409);
   inFlightClosures.add(symbol);
   try {
@@ -771,6 +830,7 @@ async function closePosition(symbol) {
         ? { positionSide: original.positionSide }
         : { reduceOnly: "true" })
     });
+    pendingProtectiveStops.delete(symbol);
     try {
       await cleanupOrphanedProtectiveStops(await listPositions());
       return { status: "closed", orderId: order.orderId };
@@ -826,8 +886,13 @@ async function handleApi(request, response, pathname) {
       return;
     }
     const positions = await listPositions();
-    const protectionOrders = await cleanupOrphanedProtectiveStops(positions);
-    sendJson(response, 200, { positions, protectionOrders });
+    const protectionResult = await cleanupOrphanedProtectiveStops(positions);
+    sendJson(response, 200, {
+      positions,
+      protectionOrders: protectionResult.installedOrders,
+      protectionExits: protectionResult.closedAtRoi,
+      protectionWarnings: protectionResult.protectionWarnings
+    });
     return;
   }
   if (pathname === "/api/trading/signal" && request.method === "POST") {

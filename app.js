@@ -558,7 +558,27 @@ async function refreshPositions() {
   }
   const result = await requestTradingApi("/api/trading/positions");
   openPositionCount = result.positions.length;
-  positions = new Map(result.positions.map((position) => [position.symbol, position]));
+  const updatedPositions = new Map(result.positions.map((position) => [position.symbol, position]));
+  const closedSymbols = [...positions.keys()].filter((symbol) => !updatedPositions.has(symbol));
+  if (closedSymbols.length) {
+    const closedSymbolSet = new Set(closedSymbols);
+    const previousAlertCount = alerts.length;
+    alerts = alerts.filter((alert) => !closedSymbolSet.has(alert.symbol));
+    if (alerts.length !== previousAlertCount) {
+      saveAlerts();
+      showToast(`${closedSymbols.join(", ")} position closed on Binance; removed from Latest Alerts.`);
+    }
+  }
+  positions = updatedPositions;
+  for (const exit of result.protectionExits || []) {
+    showToast(
+      `${exit.reason} ROI was already reached for ${exit.symbol}; the position was closed at ${exit.roi.toFixed(1)}% ROI.` +
+      (exit.cleanupWarning ? ` ${exit.cleanupWarning}` : "")
+    );
+  }
+  for (const warning of result.protectionWarnings || []) {
+    showToast(`${warning.symbol} ${warning.type} order was rejected: ${warning.message}`);
+  }
   if (Array.isArray(result.protectionOrders) && result.protectionOrders.length) {
     const ordersBySymbol = new Map();
     for (const order of result.protectionOrders) {
@@ -753,8 +773,14 @@ async function executeSignal(alert) {
       let message;
       if (result.protectionWarning) {
         message = result.protectionWarning;
+      } else if (result.protectionExit) {
+        message = `${result.protectionExit.reason} ROI was already reached for ${alert.symbol}; the position was closed at ${result.protectionExit.roi.toFixed(1)}% ROI.`;
       } else if (result.orderType === "LIMIT") {
         message = `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; a stop-loss at ${formatPrice(result.stopLossPrice)} will be set after it fills.`;
+      } else if (result.protectionWarnings?.length) {
+        message = result.protectionWarnings
+          .map(({ type, message: errorMessage }) => `${alert.symbol} ${type} order was rejected: ${errorMessage}`)
+          .join(" ");
       } else if (result.protectiveOrdersPending) {
         message = `${result.direction || tradeDirection} market order placed for ${alert.symbol}; TP/SL orders are waiting for the position to appear.`;
       } else if (result.protectiveOrders?.length) {
