@@ -1,8 +1,8 @@
 # Wickwatch
 
-Wickwatch scans Binance USD-M Futures for closed one-minute candles whose
-absolute open-to-close move exceeds your threshold. It can optionally send
-orders to Binance Demo or Live Futures.
+Wickwatch scans Binance USD-M Futures for closed candles on a configurable
+interval whose absolute open-to-close move exceeds your threshold. It can
+optionally send orders to Binance Demo or Live Futures.
 
 ## Run locally
 
@@ -18,8 +18,9 @@ static web server when using trading.
 
 ## Scanner
 
-- Scans active USDT perpetual contracts using Binance's public one-minute
-  market stream.
+- Scans active USDT perpetual contracts using Binance's public market stream.
+  Choose 1-minute, 5-minute, 15-minute, 1-hour, 4-hour, 8-hour, or 1-day
+  candles in Settings; the selected interval is saved in browser storage.
 - Records a signal when a closed candle's absolute open-to-close move is
   strictly greater than the configured threshold. Upward moves are LONG signals;
   downward moves are SHORT signals.
