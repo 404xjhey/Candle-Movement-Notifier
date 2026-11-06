@@ -177,6 +177,7 @@ td { height: 58px; padding: 0 15px; border-top: 1px solid #202926; color: #c7d0c
 .coin-mark { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; border: 1px solid #34412f; border-radius: 50%; background: #1b251a; color: var(--accent); font-family: var(--sans); font-size: 10px; font-weight: 700; }
 .contract-name { color: #e1e9e3; font-family: var(--sans); font-size: 12px; font-weight: 600; }
 .contract-quote { margin-left: 4px; color: #7b8780; font-family: var(--sans); font-size: 10px; }
+.timeframe-value { color: #9aa79d; }
 .range-value { color: var(--green); }
 .range-value.negative { color: #e58b83; }
 .change-value { color: var(--green); }

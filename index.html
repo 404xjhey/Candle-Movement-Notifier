@@ -59,7 +59,7 @@
             <div>
               <div class="eyebrow"><span class="eyebrow-line"></span> MARKET SCANNER</div>
               <h1 id="page-title">Candle alerts<span class="heading-period">.</span></h1>
-              <p class="page-description">Large one-minute moves across Binance USD-M perpetuals.</p>
+              <p class="page-description" id="scanner-description">Large one-minute moves across Binance USD-M perpetuals.</p>
             </div>
             <div class="overview-heading-actions">
               <button class="trade-session-button" id="trading-session-button" type="button" disabled>START TRADING</button>
@@ -114,11 +114,12 @@
                 <thead>
                   <tr>
                     <th scope="col">CONTRACT</th>
+                    <th scope="col">TIMEFRAME</th>
                     <th scope="col">CANDLE MOVE</th>
                     <th scope="col">24H CHANGE</th>
                     <th scope="col">CLOSE PRICE</th>
                     <th scope="col">PNL %</th>
-                    <th scope="col">1M VOLUME (USDT)</th>
+                    <th scope="col">CANDLE VOLUME (USDT)</th>
                     <th scope="col">BIAS</th>
                     <th scope="col">CLOSED AT</th>
                     <th scope="col">CLOSE</th>
@@ -160,6 +161,21 @@
             <div class="settings-card-heading">
               <div class="settings-symbol range-symbol" aria-hidden="true"><span></span><i></i><b></b></div>
               <div><h2>Alert conditions</h2>              <p>Choose the minimum open-to-close move for a signal.</p></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label for="timeframe-input">Candle timeframe</label>
+                <p>Choose the Binance Futures candle interval used to scan for qualifying moves.</p>
+              </div>
+              <select id="timeframe-input" name="timeframe" class="settings-select">
+                <option value="1m">1 minute</option>
+                <option value="5m">5 minutes</option>
+                <option value="15m">15 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="4h">4 hours</option>
+                <option value="8h">8 hours</option>
+                <option value="1d">1 day</option>
+              </select>
             </div>
             <div class="setting-row range-setting">
               <div class="setting-copy">
@@ -309,7 +325,7 @@
 
           <section class="about-card">
             <div class="about-icon" aria-hidden="true">i</div>
-            <div><strong>Market coverage</strong><p>All active Binance USD-M USDT perpetual contracts, streamed on the 1-minute interval. Scanner preferences and alert history are saved in this browser; trading requires the local server.</p></div>
+            <div><strong>Market coverage</strong><p id="market-coverage-description">All active Binance USD-M USDT perpetual contracts, streamed on the 1-minute interval. Scanner preferences and alert history are saved in this browser; trading requires the local server.</p></div>
           </section>
           <footer class="page-footer">
             <span>WICKWATCH <span class="footer-dot">/</span> BINANCE USD-M FUTURES</span>

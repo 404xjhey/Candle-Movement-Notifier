@@ -9,6 +9,7 @@ const MAX_OPEN_TRADES = 100;
 const SUBSCRIPTION_BATCH_SIZE = 100;
 const SUBSCRIPTION_INTERVAL_MS = 250;
 const REVERSE_CALL_LOOKBACK_MINUTES = 120;
+const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "8h", "1d"];
 
 const elements = {
   connectionIndicator: document.querySelector("#connection-indicator"),
@@ -18,6 +19,10 @@ const elements = {
   alertsCount: document.querySelector("#alerts-count"),
   alertLimitDisplay: document.querySelector("#alert-limit-display"),
   thresholdDisplay: document.querySelector("#threshold-display"),
+  scannerDescription: document.querySelector("#scanner-description"),
+  emptyDescription: document.querySelector("#empty-description"),
+  marketCoverageDescription: document.querySelector("#market-coverage-description"),
+  timeframeInput: document.querySelector("#timeframe-input"),
   lastUpdated: document.querySelector("#last-updated"),
   alertsBody: document.querySelector("#alerts-body"),
   emptyState: document.querySelector("#empty-state"),
@@ -80,6 +85,7 @@ function loadSettings() {
     const alertLimit = Number(saved.alertLimit);
     const maxOpenTrades = Number(saved.maxOpenTrades);
     return {
+      timeframe: TIMEFRAMES.includes(saved.timeframe) ? saved.timeframe : "1m",
       threshold: Number.isFinite(threshold) && threshold >= 0.1 && threshold <= 100 ? threshold : 5,
       alertLimit: Number.isInteger(alertLimit) && alertLimit >= 1 && alertLimit <= MAX_ALERT_LIMIT
         ? alertLimit
@@ -104,6 +110,7 @@ function loadSettings() {
   } catch (error) {
     console.warn("Could not read Wickwatch settings from local storage.", error);
     return {
+      timeframe: "1m",
       threshold: 5,
       alertLimit: DEFAULT_ALERT_LIMIT,
       maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
@@ -144,6 +151,7 @@ function loadAlerts() {
       Number.isFinite(alert.closeTime)
     ).map((alert) => ({
       ...alert,
+      timeframe: TIMEFRAMES.includes(alert.timeframe) ? alert.timeframe : "1m",
       changePercent: Number.isFinite(alert.changePercent) ? alert.changePercent : null,
       direction: alert.direction === "SHORT" ? "SHORT" : "LONG",
       tradeStatus: typeof alert.tradeStatus === "string" ? alert.tradeStatus : "not-traded"
@@ -207,7 +215,14 @@ function setConnection(state, message = "") {
 }
 
 function renderSettings() {
+  const timeframeLabel = getTimeframeLabel(settings.timeframe);
   elements.thresholdDisplay.innerHTML = `${settings.threshold.toFixed(1)}<span class="stat-unit">%</span>`;
+  elements.timeframeInput.value = settings.timeframe;
+  elements.scannerDescription.textContent = `Large ${timeframeLabel} moves across Binance USD-M perpetuals.`;
+  elements.emptyDescription.textContent =
+    `Alerts will appear here when a ${timeframeLabel} candle moves up or down beyond your threshold.`;
+  elements.marketCoverageDescription.textContent =
+    `All active Binance USD-M USDT perpetual contracts, streamed on the ${timeframeLabel} interval. Scanner preferences and alert history are saved in this browser; trading requires the local server.`;
   elements.thresholdInput.value = String(settings.threshold);
   elements.alertLimitInput.value = String(settings.alertLimit);
   elements.maxOpenTradesInput.value = String(settings.maxOpenTrades);
@@ -270,6 +285,18 @@ function formatCloseTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 
+function getTimeframeLabel(timeframe) {
+  return ({
+    "1m": "1-minute",
+    "5m": "5-minute",
+    "15m": "15-minute",
+    "1h": "1-hour",
+    "4h": "4-hour",
+    "8h": "8-hour",
+    "1d": "1-day"
+  })[timeframe] || "1-minute";
+}
+
 function formatChangePercent(value) {
   if (!Number.isFinite(value)) return "N/A";
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
@@ -315,6 +342,7 @@ function renderAlerts() {
     contractCell.append(contract);
     row.append(contractCell);
 
+    addCell(row, "timeframe-value", alert.timeframe || "1m");
     const rangeCell = addCell(row, "range-value", `${alert.movePercent.toFixed(2)}%`);
     rangeCell.classList.toggle("negative", alert.movePercent < 0);
     const rangeTrack = document.createElement("span");
@@ -402,9 +430,10 @@ function handleTickers(tickers) {
 }
 
 function exportAlerts() {
-  const headers = ["Contract", "Candle Move", "24h Change", "Close Price", "PnL %", "1m Volume (USDT)", "Bias", "Closed At", "Trade Status"];
+  const headers = ["Contract", "Timeframe", "Candle Move", "24h Change", "Close Price", "PnL %", "Candle Volume (USDT)", "Bias", "Closed At", "Trade Status"];
   const rows = alerts.map((alert) => [
     alert.symbol,
+    alert.timeframe || "1m",
     `${alert.movePercent.toFixed(2)}%`,
     formatChangePercent(tickerChanges.get(alert.symbol) ?? alert.changePercent),
     String(alert.close),
@@ -428,7 +457,7 @@ function exportAlerts() {
 
 function notify(alert) {
   if (!settings.notifications || !("Notification" in window) || Notification.permission !== "granted") return;
-  new Notification(`${alert.symbol} candle alert`, {
+  new Notification(`${alert.symbol} ${alert.timeframe} candle alert`, {
     body: `${alert.direction === "SHORT" ? "Bearish" : "Bullish"} ${Math.abs(alert.movePercent).toFixed(2)}% move | Close ${formatPrice(alert.close)} | ${formatVolume(alert.quoteVolume)} volume`
   });
 }
@@ -455,7 +484,7 @@ async function hasRecentClosingPrice(alert) {
 
 function handleKline(message) {
   const candle = message.k;
-  if (!candle || candle.i !== "1m" || candle.x !== true) return;
+  if (!candle || candle.i !== settings.timeframe || candle.x !== true) return;
 
   const open = Number(candle.o);
   const close = Number(candle.c);
@@ -469,13 +498,14 @@ function handleKline(message) {
   if (Math.abs(movePercent) <= settings.threshold) return;
   if (alerts.some((alert) => alert.symbol === candle.s)) return;
 
-  const id = `${candle.s}:${candle.t}`;
+  const id = `${candle.s}:${settings.timeframe}:${candle.t}`;
   if (seenCandles.has(id)) return;
   seenCandles.add(id);
 
   const alert = {
     id,
     symbol: candle.s,
+    timeframe: settings.timeframe,
     movePercent,
     direction: movePercent > 0 ? "LONG" : "SHORT",
     high,
@@ -841,7 +871,7 @@ async function closeTrade(symbol) {
 
 function subscribeToMarkets() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const streams = [...markets.map((symbol) => `${symbol.toLowerCase()}@kline_1m`), "!ticker@arr"];
+  const streams = [...markets.map((symbol) => `${symbol.toLowerCase()}@kline_${settings.timeframe}`), "!ticker@arr"];
   let offset = 0;
   let requestId = 1;
 
@@ -858,7 +888,8 @@ function subscribeToMarkets() {
       allMarketsSubmitted = true;
       if (subscriptionIdsAwaitingAck.size === 0) {
         setConnection("connected");
-        elements.lastUpdated.textContent = `Watching ${markets.length.toLocaleString("en-US")} markets`;
+        elements.lastUpdated.textContent =
+          `Watching ${markets.length.toLocaleString("en-US")} markets on ${settings.timeframe}`;
       }
       return;
     }
@@ -937,6 +968,15 @@ function connectSocket() {
     setConnection("reconnecting", "The market stream disconnected. Reconnecting automatically.");
     reconnectTimer = window.setTimeout(connectSocket, 3000);
   });
+}
+
+function reconnectMarketStream() {
+  window.clearTimeout(reconnectTimer);
+  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
+    socket.close();
+  } else if (socket?.readyState !== WebSocket.CLOSING && markets.length > 0) {
+    connectSocket();
+  }
 }
 
 async function loadMarketsAndConnect() {
@@ -1095,7 +1135,9 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     showToast("This browser does not support desktop notifications.");
   }
 
+  const previousTimeframe = settings.timeframe;
   settings = {
+    timeframe: elements.timeframeInput.value,
     threshold,
     alertLimit,
     maxOpenTrades,
@@ -1114,6 +1156,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     saveAlerts();
     renderSettings();
     renderAlerts();
+    if (previousTimeframe !== settings.timeframe) reconnectMarketStream();
     try {
       const tradingPayload = {
         mode: tradeMode,
@@ -1213,6 +1256,7 @@ for (const input of [elements.takeProfitRoiInput, elements.stopLossRoiInput]) {
 elements.strategyInput.addEventListener("change", toggleDefaultRoiSettings);
 
 for (const input of [
+  elements.timeframeInput,
   elements.strategyInput,
   elements.tradeDirectionInput,
   elements.marginUnitInput,
