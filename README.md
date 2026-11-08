@@ -42,7 +42,7 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
 2. Enter both the API key and secret for the selected Binance environment.
    The password fields are masked. The local server keeps credentials in memory
    only; they are not saved to browser storage and are cleared when it stops.
-3. Choose a trading strategy, allowed trade direction, a per-order margin amount, and **Maximum open
+3. Choose a trading strategy, stop-loss method, allowed trade direction, a per-order margin amount, and **Maximum open
    trades** (default 15; configurable from 1 to 100). The cap counts all open
    Binance Futures positions on the selected account, including positions
    opened outside Wickwatch. Reverse call with limit also counts resting entry
@@ -50,24 +50,37 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    A percentage margin uses available USDT margin; a fixed amount uses USDT.
    Position notional is margin multiplied by **5x leverage**.
    **Default** follows the candle direction (green = long, red = short).
-   Long and short positions use the nearest strong support/resistance from 60
-   completed 1-minute candles for the exchange-hosted stop-loss: support for
-   Long, resistance for Short. A strong level requires at least two confirmed
-   swing-pivot touches within 0.15%; the stop is placed 0.1% beyond the level.
-   If no strong level is available, the configured negative **Fallback
-   stop-loss ROI** is used (default `-10`). Default trades can also use an
+   **Support/resistance (existing)** uses the nearest strong support/resistance
+   from 60 completed 1-minute candles for the exchange-hosted stop-loss: support
+   for Long, resistance for Short. A strong level requires at least two
+   confirmed swing-pivot touches within 0.15%; the stop is placed 0.1% beyond
+   the level. **Minimum-move candle** checks the 15 completed candles before
+   each signal, using the configured scanner timeframe and minimum-move
+   threshold. It picks the oldest candle with the same color as the signal that
+   also exceeds the threshold, then uses its low for a Long stop only if it is
+   below the signal candle's low, or its high for a Short stop only if it is
+   above the signal candle's high. If none qualify or that comparison fails,
+   it uses the signal candle's low or high.
+   The configured negative **Fallback stop-loss ROI** is used if support/
+   resistance has no strong level or the selected candle price is not a valid
+   protective trigger for the entry (default `-10`). If Binance cannot provide
+   all 15 prior candles for the minimum-move method, no order is submitted.
+   Default trades can also use an
    optional positive **Take-profit ROI**. Take-profit ROI is converted to an
    exchange-hosted mark-price trigger at 5x leverage, before fees and funding.
-   Wickwatch submits the entry first, then calculates and places its protective
-   orders. There can be a short interval before the stop is active. If 1-minute
-   data is unavailable, the ROI fallback is used and a warning is shown. Once
-   placed, Binance keeps these orders active if Wickwatch closes. If a stop or
+   Wickwatch places protective orders after the entry; the minimum-move candle
+   stop price is selected before entry, while support/resistance is calculated
+   after entry. There can be a short interval before the stop is active. If
+   1-minute support/resistance data is unavailable, the ROI fallback is used
+   and a warning is shown. Once placed, Binance keeps these orders active if
+   Wickwatch closes. If a stop or
    take-profit is already reached before its order can be placed, Wickwatch
    closes the position immediately. Triggered market orders can slip.
    **Reverse Call** takes the opposite side at market after a qualifying
    candle closes. **Reverse call with limit** places a GTC limit order 2.5%
-   beyond the candle high or low. The same 1-minute support/resistance stop is
-   installed after the limit position fills.
+   beyond the candle high or low. The selected stop-loss method is applied
+   after a limit position fills; the minimum-move candle stop remains anchored
+   to the original signal candle.
    Stop-market execution can slip, especially in fast markets.
    The trade-direction setting filters the resulting order direction for every
    strategy.
@@ -83,9 +96,9 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
 Create separate Demo and Live API keys. Grant only the permissions needed for
 Futures trading; withdrawals are not needed. Keep keys private and do not expose
 this server beyond the local machine. Live mode can lose funds. Reverse Call
-market trades do not set take-profit orders; their stop-loss uses the same
-1-minute support/resistance logic. Reverse call with limit sets its protective
-stop after the entry fills as described above. Demo trading uses Binance's
+market trades do not set take-profit orders. Their stop-loss uses the selected
+stop-loss method. Reverse call with limit sets its protective stop after the
+entry fills as described above. Demo trading uses Binance's
 separate Futures demo API and credentials.
 
 The market scanner uses public live Binance market data even while orders are

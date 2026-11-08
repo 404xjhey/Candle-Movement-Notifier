@@ -43,6 +43,7 @@ const elements = {
   marginUnitInput: document.querySelector("#margin-unit-input"),
   takeProfitRoiInput: document.querySelector("#take-profit-roi-input"),
   stopLossRoiInput: document.querySelector("#stop-loss-roi-input"),
+  stopLossMethodInput: document.querySelector("#stop-loss-method-input"),
   tradeModeInput: document.querySelector("#trade-mode-input"),
   tradingSessionButton: document.querySelector("#trading-session-button"),
   tradingSessionStatus: document.querySelector("#trading-session-status"),
@@ -108,6 +109,9 @@ function loadSettings() {
       stopLossRoi: saved.stopLossRoi === undefined
         ? DEFAULT_STOP_LOSS_ROI
         : loadRoiSetting(saved.stopLossRoi, "negative"),
+      stopLossMethod: ["support-resistance", "minimum-move-candle"].includes(saved.stopLossMethod)
+        ? saved.stopLossMethod
+        : "support-resistance",
       tradingEnabled: false
     };
   } catch (error) {
@@ -125,6 +129,7 @@ function loadSettings() {
       marginUnit: "percent",
       takeProfitRoi: "",
       stopLossRoi: DEFAULT_STOP_LOSS_ROI,
+      stopLossMethod: "support-resistance",
       tradingEnabled: false
     };
   }
@@ -236,6 +241,7 @@ function renderSettings() {
   elements.marginUnitInput.value = settings.marginUnit;
   elements.takeProfitRoiInput.value = settings.takeProfitRoi === "" ? "" : String(settings.takeProfitRoi);
   elements.stopLossRoiInput.value = settings.stopLossRoi === "" ? "" : String(settings.stopLossRoi);
+  elements.stopLossMethodInput.value = settings.stopLossMethod;
   elements.tradeModeInput.value = settings.tradeMode;
   toggleDefaultRoiSettings();
   renderTradingSession();
@@ -243,8 +249,16 @@ function renderSettings() {
 
 function toggleDefaultRoiSettings() {
   const isDefault = elements.strategyInput.value === "default";
+  const isSupportResistance = elements.stopLossMethodInput.value === "support-resistance";
+  const isMinimumMoveCandle = elements.stopLossMethodInput.value === "minimum-move-candle";
   document.querySelectorAll(".default-roi-setting").forEach((setting) => {
     setting.hidden = !isDefault;
+  });
+  document.querySelectorAll(".support-resistance-stop-setting").forEach((setting) => {
+    setting.hidden = !isDefault || !isSupportResistance;
+  });
+  document.querySelectorAll(".minimum-move-stop-setting").forEach((setting) => {
+    setting.hidden = !isMinimumMoveCandle;
   });
 }
 
@@ -518,7 +532,8 @@ function handleKline(message) {
     openTime: candle.t,
     close,
     quoteVolume,
-    closeTime: candle.T
+    closeTime: candle.T,
+    threshold: settings.threshold
   };
   alerts.unshift(alert);
   alerts = alerts.slice(0, settings.alertLimit);
@@ -650,6 +665,7 @@ async function loadTradingStatus() {
     settings.marginUnit = tradingStatus.marginUnit;
     settings.takeProfitRoi = tradingStatus.takeProfitRoi ?? "";
     settings.stopLossRoi = tradingStatus.stopLossRoi ?? "";
+    settings.stopLossMethod = tradingStatus.stopLossMethod;
     settings.maxOpenTrades = tradingStatus.maxOpenTrades;
     saveSettings();
     renderSettings();
@@ -725,6 +741,7 @@ async function toggleTradingSession() {
     settings.marginUnit = tradingStatus.marginUnit;
     settings.takeProfitRoi = tradingStatus.takeProfitRoi ?? "";
     settings.stopLossRoi = tradingStatus.stopLossRoi ?? "";
+    settings.stopLossMethod = tradingStatus.stopLossMethod;
     saveSettings();
     showToast(`Trading started in ${tradingStatus.mode.toUpperCase()} mode. New qualifying candles can place orders.`);
   } catch (error) {
@@ -786,7 +803,10 @@ async function executeSignal(alert) {
         direction: alert.direction,
         signalId: alert.id,
         candleHigh: alert.high,
-        candleLow: alert.low
+        candleLow: alert.low,
+        candleOpenTime: alert.openTime,
+        timeframe: alert.timeframe,
+        threshold: alert.threshold
       })
     });
     alert.tradeStatus = result.status === "placed"
@@ -809,7 +829,10 @@ async function executeSignal(alert) {
       } else if (result.protectionExit) {
         message = `${result.protectionExit.reason} ROI was already reached for ${alert.symbol}; the position was closed at ${result.protectionExit.roi.toFixed(1)}% ROI.`;
       } else if (result.orderType === "LIMIT") {
-        message = `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; its 1-minute stop-loss will be calculated and set after it fills.`;
+        const stopDescription = result.stopLossMethod === "minimum-move-candle"
+          ? "its signal-based candle stop-loss will be set after it fills"
+          : "its 1-minute support/resistance stop-loss will be calculated and set after it fills";
+        message = `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; ${stopDescription}.`;
       } else if (result.protectionWarnings?.length) {
         message = result.protectionWarnings
           .map(({ type, message: errorMessage }) => `${alert.symbol} ${type} protection warning: ${errorMessage}`)
@@ -1152,6 +1175,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     marginUnit,
     takeProfitRoi: takeProfitRoi ?? "",
     stopLossRoi: stopLossRoi ?? "",
+    stopLossMethod: elements.stopLossMethodInput.value,
     tradingEnabled: false
   };
   if (saveSettings()) {
@@ -1169,6 +1193,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
         marginUnit,
         takeProfitRoi,
         stopLossRoi,
+        stopLossMethod: settings.stopLossMethod,
         maxOpenTrades,
         liveConfirmed: tradeMode === "live" && (liveNeedsConfirmation || tradingStatus?.mode === "live")
       };
@@ -1212,6 +1237,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
         settings.marginUnit = tradingStatus.marginUnit;
         settings.takeProfitRoi = tradingStatus.takeProfitRoi ?? "";
         settings.stopLossRoi = tradingStatus.stopLossRoi ?? "";
+        settings.stopLossMethod = tradingStatus.stopLossMethod;
         settings.maxOpenTrades = tradingStatus.maxOpenTrades;
         saveSettings();
       } catch (statusError) {
@@ -1257,6 +1283,7 @@ for (const input of [elements.takeProfitRoiInput, elements.stopLossRoiInput]) {
 }
 
 elements.strategyInput.addEventListener("change", toggleDefaultRoiSettings);
+elements.stopLossMethodInput.addEventListener("change", toggleDefaultRoiSettings);
 
 for (const input of [
   elements.timeframeInput,

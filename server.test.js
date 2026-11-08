@@ -6,6 +6,7 @@ const {
   formatPrice,
   formatQuantity,
   getLimitEntryPrice,
+  getMinimumMoveStopPrice,
   getRoiTriggerPrice,
   getSupportResistanceStopPrice,
   getStopLossPrice,
@@ -62,6 +63,20 @@ test("sets stop triggers at approximately 50% PnL loss using 5x leverage", () =>
   assert.equal(getStopLossPrice("LONG", 92.62, "0.01"), "83.36");
 });
 
+test("uses the oldest matching candle only when its stop is beyond the signal candle extreme", () => {
+  const candles = [
+    [1, "100", "106", "99", "105", "1", 2],
+    [2, "100", "107", "98", "94", "1", 3],
+    [3, "100", "107", "99.901", "106", "1", 4],
+    [4, "100", "108", "98", "107", "1", 5]
+  ];
+  assert.equal(getMinimumMoveStopPrice(candles, "LONG", "LONG", 5, 110, 103, "0.01"), "99.90");
+  assert.equal(getMinimumMoveStopPrice(candles, "SHORT", "SHORT", 5, 105, 103, "0.01"), "107.00");
+  assert.equal(getMinimumMoveStopPrice(candles.slice(0, 2), "LONG", "LONG", 5, 110, 103, "0.01"), "103.00");
+  assert.equal(getMinimumMoveStopPrice(candles, "LONG", "LONG", 5, 110, 98, "0.01"), "98.00");
+  assert.equal(getMinimumMoveStopPrice(candles, "SHORT", "SHORT", 5, 108, 103, "0.01"), "108.00");
+});
+
 test("converts positive and negative ROI thresholds to directional mark-price triggers", () => {
   assert.equal(getRoiTriggerPrice("LONG", 100, 30, "0.01"), "106.00");
   assert.equal(getRoiTriggerPrice("LONG", 100, -30, "0.01"), "94.00");
@@ -105,6 +120,9 @@ test("validates the maximum open trade setting", () => {
   assert.doesNotThrow(() => validateConfig({ ...config, maxOpenTrades: 5 }));
   assert.equal(validateConfig({ ...config, strategy: "reverse-call-limit" }).strategy, "reverse-call-limit");
   assert.equal(validateConfig(config).strategy, "default");
+  assert.equal(validateConfig(config).stopLossMethod, "support-resistance");
+  assert.equal(validateConfig({ ...config, stopLossMethod: "minimum-move-candle" }).stopLossMethod, "minimum-move-candle");
+  assert.throws(() => validateConfig({ ...config, stopLossMethod: "unknown" }), /supported stop-loss method/);
   assert.equal(validateConfig({ ...config, takeProfitRoi: 30, stopLossRoi: -30 }).takeProfitRoi, 30);
   assert.equal(validateConfig({ ...config, takeProfitRoi: "", stopLossRoi: null }).stopLossRoi, null);
   assert.throws(() => validateConfig({ ...config, takeProfitRoi: -30 }), /greater than 0/);
@@ -145,6 +163,7 @@ test("does not expose Binance secrets in trading status", () => {
   assert.equal(Object.hasOwn(status, "apiSecret"), false);
   assert.equal(Object.hasOwn(status, "apiKey"), false);
   assert.equal(status.stopLossRoi, -10);
+  assert.equal(status.stopLossMethod, "support-resistance");
   assert.equal(status.maxOpenTrades, 15);
 });
 
@@ -165,6 +184,8 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.match(pageContent, /id="strategy-input"/);
   assert.match(pageContent, /id="take-profit-roi-input"/);
   assert.match(pageContent, /id="stop-loss-roi-input"[^>]*value="-10"/);
+  assert.match(pageContent, /id="stop-loss-method-input"/);
+  assert.match(pageContent, /value="minimum-move-candle">Minimum-move candle/);
   assert.match(pageContent, /value="reverse-call-limit">Reverse call with limit/);
 
   const rejected = await fetch(`${baseUrl}/api/trading/status`, {
@@ -218,6 +239,8 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   let nextMarketMarkPrice = 0.00000053;
   let rejectTakeProfitOnce = false;
   let failStopCandleRequest = false;
+  let minimumMoveCandles = [];
+  let expectedCandleOpenTime;
   let stopCandles = Array.from({ length: 61 }, (_, index) => [
     index * 60000,
     "0.00000051",
@@ -260,11 +283,16 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
     } else if (url.pathname === "/fapi/v1/klines") {
       requestSequence.push("klines");
       assert.equal(url.searchParams.get("interval"), "1m");
-      assert.equal(url.searchParams.get("limit"), "61");
-      if (failStopCandleRequest) {
-        return { ok: false, status: 503, json: async () => ({}) };
+      if (url.searchParams.get("limit") === "15") {
+        assert.equal(url.searchParams.get("endTime"), String(expectedCandleOpenTime - 1));
+        data = minimumMoveCandles;
+      } else {
+        assert.equal(url.searchParams.get("limit"), "61");
+        if (failStopCandleRequest) {
+          return { ok: false, status: 503, json: async () => ({}) };
+        }
+        data = stopCandles;
       }
-      data = stopCandles;
     } else if (url.pathname === "/fapi/v1/openOrders") {
       data = [];
     } else if (url.pathname === "/fapi/v1/openAlgoOrders") {
@@ -555,4 +583,60 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal(alreadyReachedResult.protectionExit.roi > 30, true);
   assert.equal(submittedOrder.reduceOnly, "true");
   assert.equal(positionIsOpen, false);
+
+  const minimumMoveConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "default",
+      stopLossMethod: "minimum-move-candle",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      stopLossRoi: -30,
+      maxOpenTrades: 5
+    })
+  });
+  assert.equal(minimumMoveConfig.status, 200);
+  assert.equal((await minimumMoveConfig.json()).stopLossMethod, "minimum-move-candle");
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+
+  expectedCandleOpenTime = Date.now() - 60_000;
+  minimumMoveCandles = Array.from({ length: 15 }, (_, index) => [
+    expectedCandleOpenTime - (15 - index) * 60_000,
+    "0.00000051",
+    "0.00000052",
+    "0.00000050",
+    "0.00000051",
+    "1",
+    expectedCandleOpenTime - (15 - index) * 60_000 + 59_999
+  ]);
+  for (const [index, low] of [[2, "0.00000045"], [11, "0.00000047"]]) {
+    minimumMoveCandles[index][2] = "0.00000056";
+    minimumMoveCandles[index][3] = low;
+    minimumMoveCandles[index][4] = "0.00000055";
+  }
+  failStopCandleRequest = false;
+  const minimumMoveSignal = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "minimum-move-stop",
+      candleHigh: 0.00000056,
+      candleLow: 0.00000048,
+      candleOpenTime: expectedCandleOpenTime,
+      timeframe: "1m",
+      threshold: 5
+    })
+  });
+  assert.equal(minimumMoveSignal.status, 200);
+  const minimumMoveResult = await minimumMoveSignal.json();
+  assert.equal(minimumMoveResult.status, "placed");
+  assert.deepEqual(minimumMoveResult.protectiveOrders, [
+    { type: "STOP_MARKET", triggerPrice: 0.00000045, source: "minimum-move candle" }
+  ]);
+  assert.equal(submittedStops.at(-1).triggerPrice, "0.00000045");
 });

@@ -227,7 +227,17 @@
                 <option value="reverse-call-limit">Reverse call with limit</option>
               </select>
             </div>
-            <div class="setting-row default-roi-setting">
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label for="stop-loss-method-input">Stop-loss method</label>
+                <p>Choose the existing support/resistance stop or use the oldest qualifying candle among the 15 candles before each signal.</p>
+              </div>
+              <select id="stop-loss-method-input" name="stopLossMethod" class="settings-select">
+                <option value="support-resistance">Support/resistance (existing)</option>
+                <option value="minimum-move-candle">Minimum-move candle</option>
+              </select>
+            </div>
+            <div class="setting-row default-roi-setting default-take-profit-setting">
               <div class="setting-copy">
                 <label for="take-profit-roi-input">Take-profit ROI</label>
                 <p>For Default trades, close at this positive ROI percentage. Leave blank to disable take-profit.</p>
@@ -240,16 +250,20 @@
             <div class="setting-row default-roi-setting">
               <div class="setting-copy">
                 <label for="stop-loss-roi-input">Fallback stop-loss ROI</label>
-                <p>Strong 1-minute support/resistance is used first; this negative ROI is used only when no strong level is found. Defaults to -10%.</p>
+                <p>Used if the selected stop-loss method cannot produce a valid stop price. Defaults to -10%; leave blank to disable the fallback.</p>
               </div>
               <div class="threshold-control">
                 <input id="stop-loss-roi-input" name="stopLossRoi" type="number" step="any" value="-10" placeholder="Optional">
                 <span>%</span>
               </div>
             </div>
-            <div class="setting-note trading-note default-roi-setting">
+            <div class="setting-note trading-note default-roi-setting support-resistance-stop-setting">
               <span class="note-icon">i</span>
               <span>Stop-loss uses a mark-price trigger 0.1% beyond the nearest strong support (Long) or resistance (Short) from 60 completed 1-minute candles. A strong level needs at least two confirmed swing-pivot touches within 0.15%. If no level is found, the fallback ROI is used. Take-profit ROI is converted to an exchange-hosted trigger at 5x leverage. If a stop or take-profit is already reached before its order can be placed, Wickwatch closes the position immediately.</span>
+            </div>
+            <div class="setting-note trading-note minimum-move-stop-setting">
+              <span class="note-icon">i</span>
+              <span>For each qualifying signal, the stop uses the low (Long) or high (Short) of the oldest same-color candle among the previous 15 candles that also exceeds the configured minimum move, but only if that low is below the signal candle's low for Long, or that high is above the signal candle's high for Short. Otherwise, it uses the signal candle's low or high. The scanner timeframe and minimum-move threshold are used. If Binance cannot provide all 15 candles, no order is submitted. If the selected price is not a valid protective trigger for the entry, the fallback stop-loss ROI is used.</span>
             </div>
             <div class="setting-row">
               <div class="setting-copy">

@@ -16,6 +16,16 @@ const STOP_LEVEL_LOOKBACK_CANDLES = 60;
 const STOP_LEVEL_PIVOT_WIDTH = 2;
 const STOP_LEVEL_CLUSTER_PERCENT = 0.15;
 const STOP_LEVEL_BUFFER_PERCENT = 0.1;
+const MINIMUM_MOVE_LOOKBACK_CANDLES = 15;
+const CANDLE_TIMEFRAME_MILLISECONDS = {
+  "1m": 60_000,
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "8h": 8 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000
+};
 const ALLOWED_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
@@ -31,6 +41,7 @@ const tradingConfig = {
   marginUnit: "percent",
   takeProfitRoi: null,
   stopLossRoi: DEFAULT_STOP_LOSS_ROI,
+  stopLossMethod: "support-resistance",
   maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
   apiKey: "",
   apiSecret: ""
@@ -60,6 +71,7 @@ function getStatus() {
     marginUnit: tradingConfig.marginUnit,
     takeProfitRoi: tradingConfig.takeProfitRoi,
     stopLossRoi: tradingConfig.stopLossRoi,
+    stopLossMethod: tradingConfig.stopLossMethod,
     maxOpenTrades: tradingConfig.maxOpenTrades,
     leverage: LEVERAGE,
     configured: Boolean(tradingConfig.apiKey && tradingConfig.apiSecret),
@@ -77,6 +89,10 @@ function validateConfig(body) {
   const strategy = body.strategy ?? "default";
   if (!["default", "reverse-call", "reverse-call-limit"].includes(strategy)) {
     throw new Error("Choose a supported trading strategy.");
+  }
+  const stopLossMethod = body.stopLossMethod ?? "support-resistance";
+  if (!["support-resistance", "minimum-move-candle"].includes(stopLossMethod)) {
+    throw new Error("Choose a supported stop-loss method.");
   }
   if (!["percent", "usdt"].includes(body.marginUnit)) {
     throw new Error("Choose percent or USDT for the order margin.");
@@ -113,7 +129,16 @@ function validateConfig(body) {
   if (apiKey.length > 256 || apiSecret.length > 256) {
     throw new Error("The Binance API key or secret is too long.");
   }
-  return { apiKey, apiSecret, marginAmount, maxOpenTrades, strategy, takeProfitRoi, stopLossRoi };
+  return {
+    apiKey,
+    apiSecret,
+    marginAmount,
+    maxOpenTrades,
+    strategy,
+    stopLossMethod,
+    takeProfitRoi,
+    stopLossRoi
+  };
 }
 
 function validateRoiSetting(value, label, sign) {
@@ -158,6 +183,7 @@ function updateConfig(body) {
   tradingConfig.marginUnit = body.marginUnit;
   tradingConfig.takeProfitRoi = validated.takeProfitRoi;
   tradingConfig.stopLossRoi = validated.stopLossRoi;
+  tradingConfig.stopLossMethod = validated.stopLossMethod;
   tradingConfig.maxOpenTrades = validated.maxOpenTrades;
   return getStatus();
 }
@@ -394,7 +420,106 @@ async function getRecentOneMinuteCandles(symbol) {
   return candles.slice(0, -1).slice(-STOP_LEVEL_LOOKBACK_CANDLES);
 }
 
+function getMinimumMoveStopPrice(
+  candles,
+  candleDirection,
+  tradeDirection,
+  threshold,
+  signalHigh,
+  signalLow,
+  tickSize
+) {
+  if (!Array.isArray(candles) ||
+      !["LONG", "SHORT"].includes(candleDirection) ||
+      !["LONG", "SHORT"].includes(tradeDirection) ||
+      !Number.isFinite(threshold) || threshold < 0 ||
+      !Number.isFinite(signalHigh) || signalHigh <= 0 ||
+      !Number.isFinite(signalLow) || signalLow <= 0 || signalHigh < signalLow) {
+    throw apiError("Cannot calculate a minimum-move candle stop from invalid signal or candle data.");
+  }
+  const oldestMatchingCandle = candles.find((candle) => {
+    const open = Number(candle[1]);
+    const high = Number(candle[2]);
+    const low = Number(candle[3]);
+    const close = Number(candle[4]);
+    if (![open, high, low, close].every(Number.isFinite) ||
+        open <= 0 || high <= 0 || low <= 0 || close <= 0 || high < low) {
+      throw apiError("Binance returned invalid historical candle data for the stop-loss.", 502);
+    }
+    const sameColor = candleDirection === "LONG" ? close > open : close < open;
+    return sameColor && Math.abs((close - open) / open) * 100 > threshold;
+  });
+  const matchingStopPrice = oldestMatchingCandle
+    ? Number(oldestMatchingCandle[tradeDirection === "LONG" ? 3 : 2])
+    : null;
+  const matchingStopIsBeyondSignal = matchingStopPrice !== null &&
+    (tradeDirection === "LONG"
+      ? matchingStopPrice < signalLow
+      : matchingStopPrice > signalHigh);
+  const stopPrice = matchingStopIsBeyondSignal
+    ? matchingStopPrice
+    : tradeDirection === "LONG"
+      ? signalLow
+      : signalHigh;
+  return formatPrice(stopPrice, tickSize, tradeDirection === "LONG" ? "down" : "up");
+}
+
+async function getMinimumMoveStopPriceFromHistory(signal, tradeDirection, tickSize) {
+  const intervalMilliseconds = CANDLE_TIMEFRAME_MILLISECONDS[signal.timeframe];
+  if (!intervalMilliseconds) throw apiError("Unsupported candle timeframe for the stop-loss.");
+  const startTime = signal.candleOpenTime - MINIMUM_MOVE_LOOKBACK_CANDLES * intervalMilliseconds;
+  const query = new URLSearchParams({
+    symbol: signal.symbol,
+    interval: signal.timeframe,
+    startTime: String(startTime),
+    endTime: String(signal.candleOpenTime - 1),
+    limit: String(MINIMUM_MOVE_LOOKBACK_CANDLES)
+  });
+  const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?${query}`);
+  if (!response.ok) {
+    throw apiError(`Could not get ${signal.symbol} ${signal.timeframe} candles for its stop-loss (${response.status}).`, 502);
+  }
+  const candles = await response.json();
+  if (!Array.isArray(candles) || candles.length < MINIMUM_MOVE_LOOKBACK_CANDLES) {
+    throw apiError(`Binance returned insufficient ${signal.symbol} ${signal.timeframe} candle history for its stop-loss.`, 502);
+  }
+  if (candles.some((candle) => !Array.isArray(candle) || candle.length < 7 ||
+      !Number.isFinite(Number(candle[0])) || Number(candle[0]) >= signal.candleOpenTime ||
+      ![Number(candle[1]), Number(candle[2]), Number(candle[3]), Number(candle[4])]
+        .every((price) => Number.isFinite(price) && price > 0) ||
+      Number(candle[2]) < Number(candle[3]))) {
+    throw apiError(`Binance returned invalid ${signal.symbol} ${signal.timeframe} candles for its stop-loss.`, 502);
+  }
+  return getMinimumMoveStopPrice(
+    candles.slice(-MINIMUM_MOVE_LOOKBACK_CANDLES),
+    signal.candleDirection,
+    tradeDirection,
+    signal.threshold,
+    signal.candleHigh,
+    signal.candleLow,
+    tickSize
+  );
+}
+
 async function resolveLevelStopLoss(order, symbol, position, tickSize) {
+  if (order.candleBased) {
+    if (order.triggerPrice) {
+      const stopIsAdverse = position.direction === "LONG"
+        ? Number(order.triggerPrice) < position.entryPrice
+        : Number(order.triggerPrice) > position.entryPrice;
+      if (stopIsAdverse) return;
+      order.triggerPrice = undefined;
+      order.stopSource = undefined;
+    }
+    if (order.roiPercent == null) {
+      order.roiPercent = order.fallbackRoiPercent;
+      order.stopSource = "ROI fallback (candle stop not valid for fill)";
+    }
+    if (order.roiPercent == null) {
+      throw apiError(`The minimum-move candle stop for ${symbol} is not valid for the filled ${position.direction} entry, and no ROI fallback is configured.`);
+    }
+    return;
+  }
   if (!order.levelBased) return;
   if (order.triggerPrice) {
     const stopIsAdverse = position.direction === "LONG"
@@ -618,21 +743,53 @@ function validateSignal(body) {
   if (!/^[A-Za-z0-9:_-]{1,100}$/.test(signalId)) throw apiError("Invalid signal identifier.");
   const candleHigh = Number(body.candleHigh);
   const candleLow = Number(body.candleLow);
-  if (tradingConfig.strategy === "reverse-call-limit" &&
+  if ((tradingConfig.strategy === "reverse-call-limit" ||
+        tradingConfig.stopLossMethod === "minimum-move-candle") &&
       (!Number.isFinite(candleHigh) || candleHigh <= 0 ||
         !Number.isFinite(candleLow) || candleLow <= 0 || candleHigh < candleLow)) {
-    throw apiError("Valid candle high and low prices are required for Reverse call with limit.");
+    throw apiError("Valid candle high and low prices are required for this trading strategy.");
+  }
+  const candleOpenTime = Number(body.candleOpenTime);
+  const timeframe = body.timeframe;
+  const threshold = Number(body.threshold);
+  if (tradingConfig.stopLossMethod === "minimum-move-candle" &&
+      (!Number.isSafeInteger(candleOpenTime) || candleOpenTime <= 0 ||
+        !Object.hasOwn(CANDLE_TIMEFRAME_MILLISECONDS, timeframe) ||
+        !Number.isFinite(threshold) || threshold < 0.1 || threshold > 100)) {
+    throw apiError("Valid signal time, candle timeframe, and minimum-move threshold are required for the selected stop-loss method.");
   }
   if (!tradingConfig.enabled) throw apiError("Automatic trading is disabled in Settings.", 409);
   const direction = getTradeDirection(candleDirection, tradingConfig.strategy);
   if (tradingConfig.direction !== "both" && tradingConfig.direction.toUpperCase() !== direction) {
-    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: true };
+    return {
+      symbol,
+      direction,
+      signalId,
+      candleDirection,
+      candleHigh,
+      candleLow,
+      candleOpenTime,
+      timeframe,
+      threshold,
+      skipped: true
+    };
   }
   if (!tradingConfig.marginAmount) throw apiError("Set the order margin in Settings before trading.", 409);
   if (!tradingConfig.apiKey || !tradingConfig.apiSecret) {
     throw apiError("Configure a Binance API key and secret in Settings first.", 409);
   }
-  return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: false };
+  return {
+    symbol,
+    direction,
+    signalId,
+    candleDirection,
+    candleHigh,
+    candleLow,
+    candleOpenTime,
+    timeframe,
+    threshold,
+    skipped: false
+  };
 }
 
 function getTradeDirection(candleDirection, strategy) {
@@ -816,10 +973,30 @@ async function placeSignalOrder(body) {
     const clientOrderId = `ww_${orderHash}`;
     const stopLossOrder = {
       type: "STOP_MARKET",
-      levelBased: true,
+      levelBased: tradingConfig.stopLossMethod === "support-resistance",
+      candleBased: tradingConfig.stopLossMethod === "minimum-move-candle",
       fallbackRoiPercent: tradingConfig.stopLossRoi,
       clientAlgoId: `ww_sl_${orderHash}`
     };
+    if (stopLossOrder.candleBased) {
+      stopLossOrder.triggerPrice = await getMinimumMoveStopPriceFromHistory(
+        signal,
+        signal.direction,
+        priceFilter.tickSize
+      );
+      const stopIsAdverse = signal.direction === "LONG"
+        ? Number(stopLossOrder.triggerPrice) < entryPrice
+        : Number(stopLossOrder.triggerPrice) > entryPrice;
+      if (stopIsAdverse) {
+        stopLossOrder.stopSource = "minimum-move candle";
+      } else if (stopLossOrder.fallbackRoiPercent != null) {
+        stopLossOrder.triggerPrice = undefined;
+        stopLossOrder.roiPercent = stopLossOrder.fallbackRoiPercent;
+        stopLossOrder.stopSource = "ROI fallback (candle stop not valid for entry)";
+      } else {
+        throw apiError(`The minimum-move candle stop for ${signal.symbol} is not valid for the ${signal.direction} entry, and no ROI fallback is configured. No order was placed.`, 409);
+      }
+    }
     if (usesLimitEntry) {
       if (!tradingConfig.enabled) {
         throw apiError("Automatic trading was disabled before the limit order could be sent.", 409);
@@ -848,6 +1025,7 @@ async function placeSignalOrder(body) {
         status: "placed",
         orderType: "LIMIT",
         direction: signal.direction,
+        stopLossMethod: tradingConfig.stopLossMethod,
         quantity: numericQuantity,
         price: entryPrice,
         leverage: LEVERAGE,
@@ -1116,6 +1294,7 @@ module.exports = {
   hasTradeCapacity,
   formatPrice,
   getLimitEntryPrice,
+  getMinimumMoveStopPrice,
   getStopLossPrice,
   validateConfig
 };
