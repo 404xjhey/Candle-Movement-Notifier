@@ -219,7 +219,7 @@
             <div class="setting-row">
               <div class="setting-copy">
                 <label for="strategy-input">Trading strategy</label>
-                <p>Default follows the candle direction and can set exchange-hosted TP/SL orders. Reverse Call trades the opposite direction at market. Reverse call with limit places an opposite-side limit 2.5% beyond the candle high or low, with a stop-loss at approximately -50% PnL.</p>
+                <p>Default follows the candle direction and can set exchange-hosted TP/SL orders. Reverse Call trades the opposite direction at market. Reverse call with limit places an opposite-side limit 2.5% beyond the candle high or low.</p>
               </div>
               <select id="strategy-input" name="strategy" class="settings-select">
                 <option value="default">Default</option>
@@ -239,17 +239,17 @@
             </div>
             <div class="setting-row default-roi-setting">
               <div class="setting-copy">
-                <label for="stop-loss-roi-input">Stop-loss ROI</label>
-                <p>For Default trades, close at this negative ROI percentage. Leave blank to disable stop-loss.</p>
+                <label for="stop-loss-roi-input">Fallback stop-loss ROI</label>
+                <p>Strong 1-minute support/resistance is used first; this negative ROI is used only when no strong level is found. Defaults to -10%.</p>
               </div>
               <div class="threshold-control">
-                <input id="stop-loss-roi-input" name="stopLossRoi" type="number" step="any" placeholder="Optional">
+                <input id="stop-loss-roi-input" name="stopLossRoi" type="number" step="any" value="-10" placeholder="Optional">
                 <span>%</span>
               </div>
             </div>
             <div class="setting-note trading-note default-roi-setting">
               <span class="note-icon">i</span>
-              <span>ROI is converted to exchange-hosted mark-price TP/SL trigger orders at 5x leverage, before fees and funding (30% ROI is about a 6% favorable price move). If a threshold is already reached before its order can be placed, Wickwatch closes the position immediately. These orders remain on Binance if Wickwatch closes.</span>
+              <span>Stop-loss uses a mark-price trigger 0.1% beyond the nearest strong support (Long) or resistance (Short) from 60 completed 1-minute candles. A strong level needs at least two confirmed swing-pivot touches within 0.15%. If no level is found, the fallback ROI is used. Take-profit ROI is converted to an exchange-hosted trigger at 5x leverage. If a stop or take-profit is already reached before its order can be placed, Wickwatch closes the position immediately.</span>
             </div>
             <div class="setting-row">
               <div class="setting-copy">
@@ -281,7 +281,7 @@
                 <p>Stop new entries when this many Binance Futures positions are open. Existing positions, including ones opened outside Wickwatch, count toward the limit.</p>
               </div>
               <div class="threshold-control">
-                <input id="max-open-trades-input" name="maxOpenTrades" type="number" min="1" max="100" step="1" value="5" required>
+                <input id="max-open-trades-input" name="maxOpenTrades" type="number" min="1" max="100" step="1" value="15" required>
                 <span>trades</span>
               </div>
             </div>

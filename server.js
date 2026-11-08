@@ -9,8 +9,13 @@ const LEVERAGE = 5;
 const REVERSE_CALL_LIMIT_OFFSET_PERCENT = 2.5;
 const STOP_LOSS_PNL_PERCENT = 50;
 const REVERSE_CALL_LOOKBACK_MINUTES = 120;
-const DEFAULT_MAX_OPEN_TRADES = 5;
+const DEFAULT_MAX_OPEN_TRADES = 15;
+const DEFAULT_STOP_LOSS_ROI = -10;
 const MAX_OPEN_TRADES = 100;
+const STOP_LEVEL_LOOKBACK_CANDLES = 60;
+const STOP_LEVEL_PIVOT_WIDTH = 2;
+const STOP_LEVEL_CLUSTER_PERCENT = 0.15;
+const STOP_LEVEL_BUFFER_PERCENT = 0.1;
 const ALLOWED_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
@@ -25,7 +30,7 @@ const tradingConfig = {
   marginAmount: null,
   marginUnit: "percent",
   takeProfitRoi: null,
-  stopLossRoi: null,
+  stopLossRoi: DEFAULT_STOP_LOSS_ROI,
   maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
   apiKey: "",
   apiSecret: ""
@@ -86,7 +91,11 @@ function validateConfig(body) {
     throw new Error("Order margin cannot exceed 100% of available margin.");
   }
   const takeProfitRoi = validateRoiSetting(body.takeProfitRoi, "Take-profit ROI", "positive");
-  const stopLossRoi = validateRoiSetting(body.stopLossRoi, "Stop-loss ROI", "negative");
+  const stopLossRoi = validateRoiSetting(
+    body.stopLossRoi === undefined ? tradingConfig.stopLossRoi : body.stopLossRoi,
+    "Stop-loss ROI",
+    "negative"
+  );
   const maxOpenTrades = body.maxOpenTrades == null
     ? tradingConfig.maxOpenTrades
     : Number(body.maxOpenTrades);
@@ -308,6 +317,120 @@ function getRoiTriggerPrice(direction, entryPrice, roiPercent, tickSize) {
   return formatPrice(triggerPrice, tickSize, direction === "LONG" ? "up" : "down");
 }
 
+function getSupportResistanceStopPrice(candles, direction, entryPrice, tickSize) {
+  if (!Array.isArray(candles) || !["LONG", "SHORT"].includes(direction) ||
+      !Number.isFinite(entryPrice) || entryPrice <= 0) {
+    throw apiError("Cannot calculate a support/resistance stop from invalid candle or trade data.");
+  }
+  const lows = candles.map((candle) => Number(candle[3]));
+  const highs = candles.map((candle) => Number(candle[2]));
+  const pivots = [];
+  for (let index = STOP_LEVEL_PIVOT_WIDTH; index < candles.length - STOP_LEVEL_PIVOT_WIDTH; index += 1) {
+    const values = direction === "LONG" ? lows : highs;
+    const pivot = values[index];
+    const neighbors = [];
+    for (let offset = 1; offset <= STOP_LEVEL_PIVOT_WIDTH; offset += 1) {
+      neighbors.push(values[index - offset], values[index + offset]);
+    }
+    if (!Number.isFinite(pivot) || pivot <= 0 || neighbors.some((value) => !Number.isFinite(value))) continue;
+    const isPivot = direction === "LONG"
+      ? neighbors.every((value) => pivot <= value) &&
+        neighbors.slice(0, STOP_LEVEL_PIVOT_WIDTH).some((value) => pivot < value) &&
+        neighbors.slice(STOP_LEVEL_PIVOT_WIDTH).some((value) => pivot < value)
+      : neighbors.every((value) => pivot >= value) &&
+        neighbors.slice(0, STOP_LEVEL_PIVOT_WIDTH).some((value) => pivot > value) &&
+        neighbors.slice(STOP_LEVEL_PIVOT_WIDTH).some((value) => pivot > value);
+    if (isPivot) pivots.push(pivot);
+  }
+
+  const levels = [];
+  for (const pivot of pivots.sort((a, b) => a - b)) {
+    const level = levels.find((candidate) =>
+      Math.abs(pivot - candidate.average) / candidate.average * 100 <= STOP_LEVEL_CLUSTER_PERCENT
+    );
+    if (level) {
+      level.total += pivot;
+      level.touches += 1;
+      level.average = level.total / level.touches;
+    } else {
+      levels.push({ average: pivot, total: pivot, touches: 1 });
+    }
+  }
+
+  const strongLevels = levels.filter((level) =>
+    level.touches >= 2 && (direction === "LONG" ? level.average < entryPrice : level.average > entryPrice)
+  );
+  const nearestLevel = direction === "LONG"
+    ? strongLevels.sort((a, b) => b.average - a.average)[0]
+    : strongLevels.sort((a, b) => a.average - b.average)[0];
+  if (!nearestLevel) return null;
+
+  const buffer = STOP_LEVEL_BUFFER_PERCENT / 100;
+  const stopPrice = direction === "LONG"
+    ? nearestLevel.average * (1 - buffer)
+    : nearestLevel.average * (1 + buffer);
+  return formatPrice(stopPrice, tickSize, direction === "LONG" ? "down" : "up");
+}
+
+async function getRecentOneMinuteCandles(symbol) {
+  const query = new URLSearchParams({
+    symbol,
+    interval: "1m",
+    limit: String(STOP_LEVEL_LOOKBACK_CANDLES + 1)
+  });
+  const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?${query}`);
+  if (!response.ok) {
+    throw apiError(`Could not get ${symbol} 1-minute candles for its stop-loss (${response.status}).`, 502);
+  }
+  const candles = await response.json();
+  if (!Array.isArray(candles) || candles.length < STOP_LEVEL_LOOKBACK_CANDLES + 1) {
+    throw apiError(`Binance returned insufficient ${symbol} 1-minute candle history for its stop-loss.`, 502);
+  }
+  if (candles.some((candle) => !Array.isArray(candle) || candle.length < 7 ||
+      ![Number(candle[2]), Number(candle[3])].every((price) => Number.isFinite(price) && price > 0) ||
+      Number(candle[2]) < Number(candle[3]))) {
+    throw apiError(`Binance returned invalid ${symbol} 1-minute candles for its stop-loss.`, 502);
+  }
+  return candles.slice(0, -1).slice(-STOP_LEVEL_LOOKBACK_CANDLES);
+}
+
+async function resolveLevelStopLoss(order, symbol, position, tickSize) {
+  if (!order.levelBased) return;
+  if (order.triggerPrice) {
+    const stopIsAdverse = position.direction === "LONG"
+      ? Number(order.triggerPrice) < position.entryPrice
+      : Number(order.triggerPrice) > position.entryPrice;
+    if (stopIsAdverse) return;
+    order.triggerPrice = undefined;
+    order.stopSource = undefined;
+  }
+  let candles;
+  try {
+    candles = await getRecentOneMinuteCandles(symbol);
+  } catch (error) {
+    order.roiPercent = order.fallbackRoiPercent;
+    order.stopSource = "ROI fallback (1m data unavailable)";
+    if (order.roiPercent == null) throw error;
+    return `Could not calculate the 1-minute stop for ${symbol}; using the configured ROI fallback: ${error.message}`;
+  }
+  const triggerPrice = getSupportResistanceStopPrice(
+    candles,
+    position.direction,
+    position.entryPrice,
+    tickSize
+  );
+  if (triggerPrice) {
+    order.triggerPrice = triggerPrice;
+    order.stopSource = position.direction === "LONG" ? "support" : "resistance";
+  } else {
+    order.roiPercent = order.fallbackRoiPercent;
+    order.stopSource = "ROI fallback";
+    if (order.roiPercent == null) {
+      throw apiError(`No strong 1-minute ${position.direction === "LONG" ? "support" : "resistance"} was found, and no ROI stop-loss fallback is configured.`);
+    }
+  }
+}
+
 function getTradeRoiPercent(position) {
   if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0 ||
       !Number.isFinite(position.markPrice) || position.markPrice <= 0 ||
@@ -370,16 +493,39 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
     try {
       const position = openPositions.find((item) => item.symbol === symbol);
       const currentRoi = protection.waitForPosition ? getTradeRoiPercent(position) : null;
-      const reachedOrder = protection.orders.find((order) =>
-        order.roiPercent != null &&
-        (order.roiPercent > 0 ? currentRoi >= order.roiPercent : currentRoi <= order.roiPercent)
-      );
+      for (const order of protection.orders) {
+        if (protection.refreshLevelOnFill && order.levelBased) {
+          order.triggerPrice = undefined;
+          order.roiPercent = undefined;
+          order.stopSource = undefined;
+          protection.refreshLevelOnFill = false;
+        }
+        order.unavailable = false;
+        try {
+          const warning = await resolveLevelStopLoss(order, symbol, position, protection.tickSize);
+          if (warning) protectionWarnings.push({ symbol, type: order.type, message: warning });
+        } catch (error) {
+          order.unavailable = true;
+          protectionWarnings.push({ symbol, type: order.type, message: error.message });
+        }
+      }
+      const reachedOrder = protection.orders.find((order) => {
+        if (order.roiPercent != null) {
+          return order.roiPercent > 0 ? currentRoi >= order.roiPercent : currentRoi <= order.roiPercent;
+        }
+        if (order.type !== "STOP_MARKET" || order.triggerPrice == null) return false;
+        return protection.direction === "LONG"
+          ? position.markPrice <= Number(order.triggerPrice)
+          : position.markPrice >= Number(order.triggerPrice);
+      });
       if (reachedOrder) {
         const closeResult = await closePosition(symbol, { allowEntryInFlight: true });
         pendingProtectiveStops.delete(symbol);
         closedAtRoi.push({
           symbol,
-          reason: reachedOrder.type === "TAKE_PROFIT_MARKET" ? "Take-profit" : "Stop-loss",
+          reason: reachedOrder.type === "TAKE_PROFIT_MARKET"
+            ? "Take-profit"
+            : `${reachedOrder.stopSource || "Stop-loss"} stop-loss`,
           roi: currentRoi,
           cleanupWarning: closeResult.cleanupWarning
         });
@@ -388,6 +534,10 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
 
       let allOrdersInstalled = true;
       for (const order of protection.orders) {
+        if (order.unavailable) {
+          allOrdersInstalled = false;
+          continue;
+        }
         if (openAlgoIds.has(order.clientAlgoId)) continue;
         const triggerPrice = order.roiPercent == null
           ? order.triggerPrice
@@ -405,7 +555,12 @@ async function cleanupOrphanedProtectiveStops(openPositions) {
             ...(protection.positionSide ? { positionSide: protection.positionSide } : {})
           });
           openAlgoIds.add(order.clientAlgoId);
-          installedOrders.push({ symbol, type: order.type, triggerPrice: Number(triggerPrice) });
+          installedOrders.push({
+            symbol,
+            type: order.type,
+            triggerPrice: Number(triggerPrice),
+            ...(order.stopSource ? { source: order.stopSource } : {})
+          });
           if (protection.lastErrors) delete protection.lastErrors[order.clientAlgoId];
         } catch (error) {
           allOrdersInstalled = false;
@@ -603,7 +758,7 @@ async function placeSignalOrder(body) {
     const notionalFilter = market.filters.find((filter) =>
       filter.filterType === "MIN_NOTIONAL" || filter.filterType === "NOTIONAL"
     );
-    if (!quantityFilter || (usesLimitEntry && (!limitQuantityFilter || !priceFilter))) {
+    if (!quantityFilter || !priceFilter || (usesLimitEntry && !limitQuantityFilter)) {
       throw apiError("Binance did not provide the required quantity or price filters for this contract.", 502);
     }
     const entryPriceText = usesLimitEntry
@@ -659,9 +814,13 @@ async function placeSignalOrder(body) {
     const positionSide = dualSide.dualSidePosition ? signal.direction : undefined;
     const orderHash = crypto.createHash("sha256").update(signal.signalId).digest("hex").slice(0, 24);
     const clientOrderId = `ww_${orderHash}`;
+    const stopLossOrder = {
+      type: "STOP_MARKET",
+      levelBased: true,
+      fallbackRoiPercent: tradingConfig.stopLossRoi,
+      clientAlgoId: `ww_sl_${orderHash}`
+    };
     if (usesLimitEntry) {
-      const stopLossPrice = getStopLossPrice(signal.direction, entryPrice, priceFilter.tickSize);
-      const clientAlgoId = `ww_sl_${orderHash}`;
       if (!tradingConfig.enabled) {
         throw apiError("Automatic trading was disabled before the limit order could be sent.", 409);
       }
@@ -678,9 +837,12 @@ async function placeSignalOrder(body) {
       pendingProtectiveStops.set(signal.symbol, {
         direction: signal.direction,
         tickSize: priceFilter.tickSize,
-        orders: [{ type: "STOP_MARKET", triggerPrice: stopLossPrice, clientAlgoId }],
+        orders: [stopLossOrder],
         entryClientOrderId: clientOrderId,
-        positionSide
+        positionSide,
+        waitForPosition: true,
+        refreshLevelOnFill: true,
+        createdAt: Date.now()
       });
       const result = {
         status: "placed",
@@ -688,7 +850,6 @@ async function placeSignalOrder(body) {
         direction: signal.direction,
         quantity: numericQuantity,
         price: entryPrice,
-        stopLossPrice: Number(stopLossPrice),
         leverage: LEVERAGE,
         orderId: order.orderId
       };
@@ -712,14 +873,8 @@ async function placeSignalOrder(body) {
           clientAlgoId: `ww_tp_${orderHash}`
         });
       }
-      if (tradingConfig.stopLossRoi !== null) {
-        protectiveOrders.push({
-          type: "STOP_MARKET",
-          roiPercent: tradingConfig.stopLossRoi,
-          clientAlgoId: `ww_sl_${orderHash}`
-        });
-      }
     }
+    protectiveOrders.push(stopLossOrder);
     if (protectiveOrders.length) {
       pendingProtectiveStops.set(signal.symbol, {
         direction: signal.direction,
@@ -742,7 +897,7 @@ async function placeSignalOrder(body) {
         const protectionResult = await cleanupOrphanedProtectiveStops(openPositions);
         activeProtectiveOrders = protectionResult.installedOrders
           .filter((order) => order.symbol === signal.symbol)
-          .map(({ type, triggerPrice }) => ({ type, triggerPrice }));
+          .map(({ type, triggerPrice, source }) => ({ type, triggerPrice, ...(source ? { source } : {}) }));
         protectionExit = protectionResult.closedAtRoi.find((exit) => exit.symbol === signal.symbol);
         protectionWarnings = protectionResult.protectionWarnings
           .filter((warning) => warning.symbol === signal.symbol);
@@ -750,6 +905,7 @@ async function placeSignalOrder(body) {
             !protectionExit && !pendingProtectiveStops.has(signal.symbol)) {
           activeProtectiveOrders = protectiveOrders.map((order) => ({
             type: order.type,
+            ...(order.stopSource ? { source: order.stopSource } : {}),
             triggerPrice: Number(order.roiPercent == null
               ? order.triggerPrice
               : getRoiTriggerPrice(signal.direction, position.entryPrice, order.roiPercent, priceFilter.tickSize))
@@ -955,6 +1111,7 @@ module.exports = {
   getTradeDirection,
   getOpenPositions,
   getRoiTriggerPrice,
+  getSupportResistanceStopPrice,
   getStatus,
   hasTradeCapacity,
   formatPrice,

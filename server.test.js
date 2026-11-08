@@ -7,6 +7,7 @@ const {
   formatQuantity,
   getLimitEntryPrice,
   getRoiTriggerPrice,
+  getSupportResistanceStopPrice,
   getStopLossPrice,
   getTradeDirection,
   getOpenPositions,
@@ -19,6 +20,25 @@ test("formats market quantities down to Binance step size", () => {
   assert.equal(formatQuantity(1.239, "0.01"), "1.23");
   assert.equal(formatQuantity(0.0019, "0.0001"), "0.0019");
   assert.equal(formatQuantity(5, "1.000"), "5");
+});
+
+test("places stops beyond confirmed 1-minute support and resistance", () => {
+  const candles = Array.from({ length: 60 }, (_, index) => [
+    index * 60000,
+    "101",
+    "102",
+    "100",
+    "101",
+    "1",
+    index * 60000 + 59999
+  ]);
+  for (const [index, low, high] of [[10, 99, 102], [20, 99.1, 102], [35, 100, 105], [45, 100, 105.1]]) {
+    candles[index][2] = String(high);
+    candles[index][3] = String(low);
+  }
+  assert.equal(getSupportResistanceStopPrice(candles, "LONG", 101, "0.01"), "98.95");
+  assert.equal(getSupportResistanceStopPrice(candles, "SHORT", 101, "0.01"), "105.16");
+  assert.equal(getSupportResistanceStopPrice(candles.slice(0, 15), "LONG", 101, "0.01"), null);
 });
 
 test("maps candle direction to the selected trading strategy", () => {
@@ -124,6 +144,8 @@ test("does not expose Binance secrets in trading status", () => {
   const status = getStatus();
   assert.equal(Object.hasOwn(status, "apiSecret"), false);
   assert.equal(Object.hasOwn(status, "apiKey"), false);
+  assert.equal(status.stopLossRoi, -10);
+  assert.equal(status.maxOpenTrades, 15);
 });
 
 test("serves the dashboard locally and rejects foreign origins", async (context) => {
@@ -139,10 +161,10 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.equal(page.status, 200);
   const pageContent = await page.text();
   assert.match(pageContent, /Wickwatch/);
-  assert.match(pageContent, /id="max-open-trades-input"[^>]*value="5"/);
+  assert.match(pageContent, /id="max-open-trades-input"[^>]*value="15"/);
   assert.match(pageContent, /id="strategy-input"/);
   assert.match(pageContent, /id="take-profit-roi-input"/);
-  assert.match(pageContent, /id="stop-loss-roi-input"/);
+  assert.match(pageContent, /id="stop-loss-roi-input"[^>]*value="-10"/);
   assert.match(pageContent, /value="reverse-call-limit">Reverse call with limit/);
 
   const rejected = await fetch(`${baseUrl}/api/trading/status`, {
@@ -190,10 +212,30 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   let submittedOrder;
   const submittedStops = [];
   const activeAlgoOrders = [];
+  const requestSequence = [];
   let positionIsOpen = false;
   let positionMarkPrice = 0.00000052;
   let nextMarketMarkPrice = 0.00000053;
   let rejectTakeProfitOnce = false;
+  let failStopCandleRequest = false;
+  let stopCandles = Array.from({ length: 61 }, (_, index) => [
+    index * 60000,
+    "0.00000051",
+    "0.00000052",
+    "0.00000051",
+    "0.00000051",
+    "1",
+    index * 60000 + 59999
+  ]);
+  for (const [index, low, high] of [
+    [10, "0.00000050", "0.00000052"],
+    [20, "0.00000050", "0.00000052"],
+    [35, "0.00000051", "0.00000054"],
+    [45, "0.00000051", "0.00000054"]
+  ]) {
+    stopCandles[index][2] = high;
+    stopCandles[index][3] = low;
+  }
 
   global.fetch = async (input, options) => {
     const url = new URL(typeof input === "string" ? input : input.url);
@@ -206,7 +248,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       data = positionIsOpen
         ? [{
           symbol: "TESTUSDT",
-          positionAmt: "10000000",
+          positionAmt: submittedOrder?.side === "SELL" ? "-10000000" : "10000000",
           positionSide: "BOTH",
           entryPrice: "0.00000052",
           markPrice: String(positionMarkPrice),
@@ -215,6 +257,14 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
         : [];
     } else if (url.pathname === "/fapi/v1/ticker/price") {
       data = { price: "0.00000052" };
+    } else if (url.pathname === "/fapi/v1/klines") {
+      requestSequence.push("klines");
+      assert.equal(url.searchParams.get("interval"), "1m");
+      assert.equal(url.searchParams.get("limit"), "61");
+      if (failStopCandleRequest) {
+        return { ok: false, status: 503, json: async () => ({}) };
+      }
+      data = stopCandles;
     } else if (url.pathname === "/fapi/v1/openOrders") {
       data = [];
     } else if (url.pathname === "/fapi/v1/openAlgoOrders") {
@@ -260,6 +310,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       }
     } else if (url.pathname === "/fapi/v1/order") {
       submittedOrder = Object.fromEntries(url.searchParams);
+      requestSequence.push(`order:${submittedOrder.type}`);
       if (submittedOrder.reduceOnly === "true") {
         positionIsOpen = false;
       } else if (submittedOrder.type === "MARKET") {
@@ -312,17 +363,24 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
     })
   });
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).status, "placed");
+  const limitOrderResult = await response.json();
+  assert.equal(limitOrderResult.status, "placed");
+  assert.equal(Object.hasOwn(limitOrderResult, "stopLossPrice"), false);
   assert.equal(submittedOrder.type, "LIMIT");
   assert.equal(submittedOrder.price, "0.00000052");
   assert.equal(submittedStops.length, 0);
+  const limitEntryIndex = requestSequence.indexOf("order:LIMIT");
+  const preFillStopDataIndex = requestSequence.indexOf("klines");
+  assert.equal(preFillStopDataIndex === -1 || limitEntryIndex < preFillStopDataIndex, true);
 
   positionIsOpen = true;
   const positionsResponse = await fetch(`${baseUrl}/api/trading/positions`);
   assert.equal(positionsResponse.status, 200);
-  assert.equal(submittedStops.length, 1);
+  const positionsResult = await positionsResponse.json();
+  assert.equal(submittedStops.length, 1, JSON.stringify(positionsResult));
   assert.equal(submittedStops[0].type, "STOP_MARKET");
-  assert.equal(submittedStops[0].triggerPrice, "0.00000057");
+  assert.equal(submittedStops[0].triggerPrice, "0.00000055");
+  assert.equal(positionsResult.protectionOrders[0].source, "resistance");
 
   positionIsOpen = false;
   const orphanCleanup = await fetch(`${baseUrl}/api/trading/positions`);
@@ -346,6 +404,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal(defaultConfig.status, 200);
   assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
 
+  const marketSequenceStart = requestSequence.length;
   const marketSignal = await fetch(`${baseUrl}/api/trading/signal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -361,10 +420,14 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   const marketSignalResult = await marketSignal.json();
   assert.equal(marketSignalResult.status, "placed");
   assert.equal(submittedOrder.type, "MARKET");
+  const marketEntryIndex = requestSequence.indexOf("order:MARKET", marketSequenceStart);
+  const marketStopDataIndex = requestSequence.indexOf("klines", marketSequenceStart);
+  assert.equal(marketEntryIndex >= marketSequenceStart, true);
+  assert.equal(marketStopDataIndex > marketEntryIndex, true);
   assert.equal(marketSignalResult.protectiveOrdersPending, false);
   assert.deepEqual(marketSignalResult.protectiveOrders, [
     { type: "TAKE_PROFIT_MARKET", triggerPrice: 0.00000056 },
-    { type: "STOP_MARKET", triggerPrice: 0.00000049 }
+    { type: "STOP_MARKET", triggerPrice: 0.00000049, source: "support" }
   ]);
   assert.equal(submittedStops.length, 3);
   assert.deepEqual(submittedStops.slice(1).map(({ type }) => type), ["TAKE_PROFIT_MARKET", "STOP_MARKET"]);
@@ -395,6 +458,15 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
   positionIsOpen = false;
   await fetch(`${baseUrl}/api/trading/positions`);
+  stopCandles = Array.from({ length: 61 }, (_, index) => [
+    index * 60000,
+    "0.00000051",
+    "0.00000052",
+    "0.00000050",
+    "0.00000051",
+    "1",
+    index * 60000 + 59999
+  ]);
   nextMarketMarkPrice = 0.00000052;
   const stopLossSignal = await fetch(`${baseUrl}/api/trading/signal`, {
     method: "POST",
@@ -411,7 +483,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   const stopLossResult = await stopLossSignal.json();
   assert.equal(stopLossResult.status, "placed");
   assert.deepEqual(stopLossResult.protectiveOrders, [
-    { type: "STOP_MARKET", triggerPrice: 0.00000049 }
+    { type: "STOP_MARKET", triggerPrice: 0.00000049, source: "ROI fallback" }
   ]);
   assert.equal(submittedStops.at(-1).type, "STOP_MARKET");
   assert.equal(submittedStops.at(-1).triggerPrice, "0.00000049");
@@ -462,6 +534,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   positionIsOpen = false;
   await fetch(`${baseUrl}/api/trading/positions`);
   nextMarketMarkPrice = 0.00000057;
+  failStopCandleRequest = true;
   const alreadyReachedSignal = await fetch(`${baseUrl}/api/trading/signal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -476,6 +549,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal(alreadyReachedSignal.status, 200);
   const alreadyReachedResult = await alreadyReachedSignal.json();
   assert.equal(alreadyReachedResult.status, "placed");
+  assert.match(alreadyReachedResult.protectionWarning, /using the configured ROI fallback/);
   assert.ok(alreadyReachedResult.protectionExit, JSON.stringify(alreadyReachedResult));
   assert.equal(alreadyReachedResult.protectionExit.reason, "Take-profit");
   assert.equal(alreadyReachedResult.protectionExit.roi > 30, true);

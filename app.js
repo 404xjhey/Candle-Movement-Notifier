@@ -4,8 +4,9 @@ const SETTINGS_KEY = "wickwatch-settings-v1";
 const RECORDS_KEY = "wickwatch-alerts-v2";
 const DEFAULT_ALERT_LIMIT = 20;
 const MAX_ALERT_LIMIT = 500;
-const DEFAULT_MAX_OPEN_TRADES = 5;
+const DEFAULT_MAX_OPEN_TRADES = 15;
 const MAX_OPEN_TRADES = 100;
+const DEFAULT_STOP_LOSS_ROI = -10;
 const SUBSCRIPTION_BATCH_SIZE = 100;
 const SUBSCRIPTION_INTERVAL_MS = 250;
 const REVERSE_CALL_LOOKBACK_MINUTES = 120;
@@ -104,7 +105,9 @@ function loadSettings() {
         : "",
       marginUnit: saved.marginUnit === "usdt" ? "usdt" : "percent",
       takeProfitRoi: loadRoiSetting(saved.takeProfitRoi, "positive"),
-      stopLossRoi: loadRoiSetting(saved.stopLossRoi, "negative"),
+      stopLossRoi: saved.stopLossRoi === undefined
+        ? DEFAULT_STOP_LOSS_ROI
+        : loadRoiSetting(saved.stopLossRoi, "negative"),
       tradingEnabled: false
     };
   } catch (error) {
@@ -121,7 +124,7 @@ function loadSettings() {
       marginAmount: "",
       marginUnit: "percent",
       takeProfitRoi: "",
-      stopLossRoi: "",
+      stopLossRoi: DEFAULT_STOP_LOSS_ROI,
       tradingEnabled: false
     };
   }
@@ -607,7 +610,7 @@ async function refreshPositions() {
     );
   }
   for (const warning of result.protectionWarnings || []) {
-    showToast(`${warning.symbol} ${warning.type} order was rejected: ${warning.message}`);
+    showToast(`${warning.symbol} ${warning.type} protection warning: ${warning.message}`);
   }
   if (Array.isArray(result.protectionOrders) && result.protectionOrders.length) {
     const ordersBySymbol = new Map();
@@ -806,16 +809,16 @@ async function executeSignal(alert) {
       } else if (result.protectionExit) {
         message = `${result.protectionExit.reason} ROI was already reached for ${alert.symbol}; the position was closed at ${result.protectionExit.roi.toFixed(1)}% ROI.`;
       } else if (result.orderType === "LIMIT") {
-        message = `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; a stop-loss at ${formatPrice(result.stopLossPrice)} will be set after it fills.`;
+        message = `${result.direction} limit order placed for ${alert.symbol} at ${formatPrice(result.price)}; its 1-minute stop-loss will be calculated and set after it fills.`;
       } else if (result.protectionWarnings?.length) {
         message = result.protectionWarnings
-          .map(({ type, message: errorMessage }) => `${alert.symbol} ${type} order was rejected: ${errorMessage}`)
+          .map(({ type, message: errorMessage }) => `${alert.symbol} ${type} protection warning: ${errorMessage}`)
           .join(" ");
       } else if (result.protectiveOrdersPending) {
         message = `${result.direction || tradeDirection} market order placed for ${alert.symbol}; TP/SL orders are waiting for the position to appear.`;
       } else if (result.protectiveOrders?.length) {
         const orderSummary = result.protectiveOrders
-          .map((order) => `${order.type === "TAKE_PROFIT_MARKET" ? "TP" : "SL"} at ${formatPrice(order.triggerPrice)}`)
+          .map((order) => `${order.type === "TAKE_PROFIT_MARKET" ? "TP" : "SL"} at ${formatPrice(order.triggerPrice)}${order.source ? ` (${order.source})` : ""}`)
           .join(" and ");
         message = `${result.direction || tradeDirection} market order placed for ${alert.symbol}; ${orderSummary} exchange orders set.`;
       } else {
