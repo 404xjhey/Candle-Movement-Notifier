@@ -119,7 +119,7 @@
                     <th scope="col">24H CHANGE</th>
                     <th scope="col">CLOSE PRICE</th>
                     <th scope="col">PNL %</th>
-                    <th scope="col">CANDLE VOLUME (USDT)</th>
+                    <th scope="col">BUY / SELL VOLUME SHARE</th>
                     <th scope="col">BIAS</th>
                     <th scope="col">CLOSED AT</th>
                     <th scope="col">CLOSE</th>
@@ -219,7 +219,7 @@
             <div class="setting-row">
               <div class="setting-copy">
                 <label for="strategy-input">Trading strategy</label>
-                <p>Default follows the candle direction and can set exchange-hosted TP/SL orders. Reverse Call trades the opposite direction at market. Reverse call with limit places an opposite-side limit 2.5% beyond the candle high or low.</p>
+                <p>Each trade requires buy-initiated volume to exceed sell-initiated volume for a Long, or sell-initiated volume to exceed buy-initiated volume for a Short. Default follows the candle direction; Reverse Call strategies trade the opposite direction.</p>
               </div>
               <select id="strategy-input" name="strategy" class="settings-select">
                 <option value="default">Default</option>

@@ -25,8 +25,9 @@ static web server when using trading.
   strictly greater than the configured threshold. Upward moves are LONG signals;
   downward moves are SHORT signals.
 - Shows the move, 24-hour change, close price, directional PnL from the signal
-  close, candle volume, signal bias, close time, trade status, and a per-row
-  CLOSE button when a position is open.
+  close, buy/sell volume shares, signal bias, close time, trade status, and a
+  per-row CLOSE button when a position is open. Buy and sell volume are based
+  on Binance's taker-buy quote volume and the remainder of total quote volume.
 - Removes a token's alert from Latest Alerts after a previously observed
   Binance position for that token is closed. This is detected on the next
   successful position refresh (about every 15 seconds while the dashboard is
@@ -49,6 +50,11 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    orders. New orders are rejected when the cap is reached.
    A percentage margin uses available USDT margin; a fixed amount uses USDT.
    Position notional is margin multiplied by **5x leverage**.
+   An order is placed only when taker-initiated volume for its resulting
+   direction is greater than the opposing volume in the closed candle. Long
+   entries require stronger buy volume; Short entries require stronger sell
+   volume. Reverse Call strategies apply this condition to their opposite-side
+   order direction. Equal buy and sell volume does not qualify.
    **Default** follows the candle direction (green = long, red = short).
    Long and short positions use the nearest strong support/resistance from 60
    completed 1-minute candles for the exchange-hosted stop-loss: support for
