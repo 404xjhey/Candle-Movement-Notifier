@@ -351,6 +351,53 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   const started = await fetch(`${baseUrl}/api/trading/start`, { method: "POST" });
   assert.equal(started.status, 200);
 
+  const initialRequestCount = requestSequence.length;
+  const weakForShort = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "weak-short-volume",
+      candleHigh: 100,
+      candleLow: 90,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 60
+    })
+  });
+  assert.equal(weakForShort.status, 200);
+  assert.deepEqual(await weakForShort.json(), { status: "skipped", reason: "sell-volume-not-strong" });
+
+  const weakForLong = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "SHORT",
+      signalId: "weak-long-volume",
+      candleHigh: 100,
+      candleLow: 90,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 40
+    })
+  });
+  assert.equal(weakForLong.status, 200);
+  assert.deepEqual(await weakForLong.json(), { status: "skipped", reason: "buy-volume-not-strong" });
+  assert.equal(requestSequence.length, initialRequestCount);
+
+  const invalidVolumes = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "invalid-volume-data",
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 101
+    })
+  });
+  assert.equal(invalidVolumes.status, 400);
+
   const response = await fetch(`${baseUrl}/api/trading/signal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -359,7 +406,9 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       direction: "LONG",
       signalId: "small-limit-price",
       candleHigh: 0.0000005,
-      candleLow: 0.0000004
+      candleLow: 0.0000004,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 40
     })
   });
   assert.equal(response.status, 200);
@@ -413,7 +462,9 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       direction: "LONG",
       signalId: "default-roi-exit",
       candleHigh: 0.0000005,
-      candleLow: 0.0000004
+      candleLow: 0.0000004,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 60
     })
   });
   assert.equal(marketSignal.status, 200);
@@ -476,7 +527,9 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       direction: "LONG",
       signalId: "default-roi-stop-loss",
       candleHigh: 0.0000005,
-      candleLow: 0.0000004
+      candleLow: 0.0000004,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 60
     })
   });
   assert.equal(stopLossSignal.status, 200);
@@ -515,7 +568,9 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       direction: "LONG",
       signalId: "default-roi-tp-retry",
       candleHigh: 0.0000005,
-      candleLow: 0.0000004
+      candleLow: 0.0000004,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 60
     })
   });
   assert.equal(partiallyProtectedSignal.status, 200);
@@ -543,7 +598,9 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       direction: "LONG",
       signalId: "default-roi-tp-already-reached",
       candleHigh: 0.0000005,
-      candleLow: 0.0000004
+      candleLow: 0.0000004,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 60
     })
   });
   assert.equal(alreadyReachedSignal.status, 200);

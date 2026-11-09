@@ -155,6 +155,10 @@ function loadAlerts() {
     ).map((alert) => ({
       ...alert,
       timeframe: TIMEFRAMES.includes(alert.timeframe) ? alert.timeframe : "1m",
+      takerBuyQuoteVolume: Number.isFinite(alert.takerBuyQuoteVolume) &&
+        alert.takerBuyQuoteVolume >= 0 && alert.takerBuyQuoteVolume <= alert.quoteVolume
+        ? alert.takerBuyQuoteVolume
+        : null,
       changePercent: Number.isFinite(alert.changePercent) ? alert.changePercent : null,
       direction: alert.direction === "SHORT" ? "SHORT" : "LONG",
       tradeStatus: typeof alert.tradeStatus === "string" ? alert.tradeStatus : "not-traded"
@@ -363,7 +367,17 @@ function renderAlerts() {
     const pnlPercent = getPnlPercent(alert);
     const pnlCell = addCell(row, "pnl-value", formatChangePercent(pnlPercent));
     pnlCell.classList.toggle("negative", Number.isFinite(pnlPercent) && pnlPercent < 0);
-    addCell(row, "volume-value", formatVolume(alert.quoteVolume));
+    const sellQuoteVolume = alert.quoteVolume > 0 && Number.isFinite(alert.takerBuyQuoteVolume)
+      ? Math.max(alert.quoteVolume - alert.takerBuyQuoteVolume, 0)
+      : null;
+    const volumeCell = addCell(row, "volume-value", Number.isFinite(sellQuoteVolume)
+      ? `Buy ${((alert.takerBuyQuoteVolume / alert.quoteVolume) * 100).toFixed(0)}% / Sell ${((sellQuoteVolume / alert.quoteVolume) * 100).toFixed(0)}%`
+      : "N/A");
+    if (Number.isFinite(sellQuoteVolume)) {
+      volumeCell.title =
+        `Buy ${formatVolume(alert.takerBuyQuoteVolume)} / Sell ${formatVolume(sellQuoteVolume)} ` +
+        `(total ${formatVolume(alert.quoteVolume)})`;
+    }
 
     const biasCell = document.createElement("td");
     const bias = document.createElement("span");
@@ -433,7 +447,7 @@ function handleTickers(tickers) {
 }
 
 function exportAlerts() {
-  const headers = ["Contract", "Timeframe", "Candle Move", "24h Change", "Close Price", "PnL %", "Candle Volume (USDT)", "Bias", "Closed At", "Trade Status"];
+  const headers = ["Contract", "Timeframe", "Candle Move", "24h Change", "Close Price", "PnL %", "Candle Volume (USDT)", "Buy Volume (USDT)", "Sell Volume (USDT)", "Bias", "Closed At", "Trade Status"];
   const rows = alerts.map((alert) => [
     alert.symbol,
     alert.timeframe || "1m",
@@ -442,6 +456,10 @@ function exportAlerts() {
     String(alert.close),
     formatChangePercent(getPnlPercent(alert)),
     String(alert.quoteVolume),
+    alert.quoteVolume > 0 && Number.isFinite(alert.takerBuyQuoteVolume) ? String(alert.takerBuyQuoteVolume) : "",
+    alert.quoteVolume > 0 && Number.isFinite(alert.takerBuyQuoteVolume)
+      ? String(alert.quoteVolume - alert.takerBuyQuoteVolume)
+      : "",
     alert.direction === "SHORT" ? "Bearish" : "Bullish",
     new Date(alert.closeTime).toISOString(),
     alert.tradeStatus
@@ -494,8 +512,10 @@ function handleKline(message) {
   const high = Number(candle.h);
   const low = Number(candle.l);
   const quoteVolume = Number(candle.q);
-  if (![open, close, high, low, quoteVolume].every(Number.isFinite) ||
-      open <= 0 || high <= 0 || low <= 0 || high < low || close === open) return;
+  const takerBuyQuoteVolume = Number(candle.Q);
+  if (![open, close, high, low, quoteVolume, takerBuyQuoteVolume].every(Number.isFinite) ||
+      open <= 0 || high <= 0 || low <= 0 || high < low || close === open ||
+      quoteVolume <= 0 || takerBuyQuoteVolume < 0 || takerBuyQuoteVolume > quoteVolume) return;
 
   const movePercent = ((close - open) / open) * 100;
   if (Math.abs(movePercent) <= settings.threshold) return;
@@ -518,6 +538,7 @@ function handleKline(message) {
     openTime: candle.t,
     close,
     quoteVolume,
+    takerBuyQuoteVolume,
     closeTime: candle.T
   };
   alerts.unshift(alert);
@@ -540,6 +561,8 @@ function getTradeStatusLabel(status) {
     "order-exists": "OPEN ORDER ALREADY EXISTS",
     "limit-reached": "OPEN TRADE LIMIT REACHED",
     "direction-disabled": "DIRECTION DISABLED",
+    "buy-volume-not-strong": "BUY VOLUME NOT STRONG",
+    "sell-volume-not-strong": "SELL VOLUME NOT STRONG",
     "recent-close-price": "RECENT CLOSE PRICE",
     "history-check-failed": "HISTORY CHECK FAILED"
   }[status] || String(status).replace(/-/g, " ").toUpperCase();
@@ -786,7 +809,9 @@ async function executeSignal(alert) {
         direction: alert.direction,
         signalId: alert.id,
         candleHigh: alert.high,
-        candleLow: alert.low
+        candleLow: alert.low,
+        quoteVolume: alert.quoteVolume,
+        takerBuyQuoteVolume: alert.takerBuyQuoteVolume
       })
     });
     alert.tradeStatus = result.status === "placed"
@@ -801,7 +826,9 @@ async function executeSignal(alert) {
           ? "limit-reached"
           : result.status === "recent_close_price"
             ? "recent-close-price"
-            : "direction-disabled";
+            : result.status === "skipped"
+              ? result.reason
+              : "direction-disabled";
     if (result.status === "placed") {
       let message;
       if (result.protectionWarning) {
@@ -831,6 +858,10 @@ async function executeSignal(alert) {
       showToast(`Reverse call with limit skipped for ${alert.symbol}: an open order already exists.`);
     } else if (result.status === "recent_close_price") {
       showToast(`Reverse Call skipped for ${alert.symbol}: the current price appeared in the previous 120 minutes.`);
+    } else if (result.status === "skipped" && result.reason === "buy-volume-not-strong") {
+      showToast(`Trade skipped for ${alert.symbol}: buy-initiated volume did not exceed sell-initiated volume.`);
+    } else if (result.status === "skipped" && result.reason === "sell-volume-not-strong") {
+      showToast(`Trade skipped for ${alert.symbol}: sell-initiated volume did not exceed buy-initiated volume.`);
     }
     saveAlerts();
     try {

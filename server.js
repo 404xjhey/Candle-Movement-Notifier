@@ -618,6 +618,13 @@ function validateSignal(body) {
   if (!/^[A-Za-z0-9:_-]{1,100}$/.test(signalId)) throw apiError("Invalid signal identifier.");
   const candleHigh = Number(body.candleHigh);
   const candleLow = Number(body.candleLow);
+  const quoteVolume = Number(body.quoteVolume);
+  const takerBuyQuoteVolume = Number(body.takerBuyQuoteVolume);
+  if (!Number.isFinite(quoteVolume) || quoteVolume <= 0 ||
+      !Number.isFinite(takerBuyQuoteVolume) ||
+      takerBuyQuoteVolume < 0 || takerBuyQuoteVolume > quoteVolume) {
+    throw apiError("Valid candle quote and taker-buy volumes are required.");
+  }
   if (tradingConfig.strategy === "reverse-call-limit" &&
       (!Number.isFinite(candleHigh) || candleHigh <= 0 ||
         !Number.isFinite(candleLow) || candleLow <= 0 || candleHigh < candleLow)) {
@@ -626,7 +633,14 @@ function validateSignal(body) {
   if (!tradingConfig.enabled) throw apiError("Automatic trading is disabled in Settings.", 409);
   const direction = getTradeDirection(candleDirection, tradingConfig.strategy);
   if (tradingConfig.direction !== "both" && tradingConfig.direction.toUpperCase() !== direction) {
-    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: true };
+    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "direction-disabled" };
+  }
+  const sellQuoteVolume = quoteVolume - takerBuyQuoteVolume;
+  if (direction === "LONG" && takerBuyQuoteVolume <= sellQuoteVolume) {
+    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "buy-volume-not-strong" };
+  }
+  if (direction === "SHORT" && sellQuoteVolume <= takerBuyQuoteVolume) {
+    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "sell-volume-not-strong" };
   }
   if (!tradingConfig.marginAmount) throw apiError("Set the order margin in Settings before trading.", 409);
   if (!tradingConfig.apiKey || !tradingConfig.apiSecret) {
@@ -678,7 +692,7 @@ function getStopLossPrice(direction, entryPrice, tickSize) {
 
 async function placeSignalOrder(body) {
   const signal = validateSignal(body);
-  if (signal.skipped) return { status: "skipped", reason: "Direction is disabled in Settings." };
+  if (signal.skipped) return { status: "skipped", reason: signal.skipped };
   if (processedSignals.has(signal.signalId)) return processedSignals.get(signal.signalId);
   if (inFlightSignals.has(signal.signalId) || inFlightSymbols.has(signal.symbol) || inFlightClosures.has(signal.symbol)) {
     throw apiError("A signal for this contract is already being processed.", 409);
