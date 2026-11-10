@@ -20,9 +20,14 @@ const elements = {
   alertsCount: document.querySelector("#alerts-count"),
   alertLimitDisplay: document.querySelector("#alert-limit-display"),
   thresholdDisplay: document.querySelector("#threshold-display"),
+  moveMetricLabel: document.querySelector("#move-metric-label"),
+  alertsSubtitle: document.querySelector("#alerts-subtitle"),
   scannerDescription: document.querySelector("#scanner-description"),
   emptyDescription: document.querySelector("#empty-description"),
   marketCoverageDescription: document.querySelector("#market-coverage-description"),
+  thresholdDescription: document.querySelector("#threshold-description"),
+  thresholdNote: document.querySelector("#threshold-note"),
+  strategyDescription: document.querySelector("#strategy-description"),
   timeframeInput: document.querySelector("#timeframe-input"),
   lastUpdated: document.querySelector("#last-updated"),
   alertsBody: document.querySelector("#alerts-body"),
@@ -96,7 +101,7 @@ function loadSettings() {
         : DEFAULT_MAX_OPEN_TRADES,
       notifications: saved.notifications === true,
       tradeMode: saved.tradeMode === "live" ? "live" : "demo",
-      strategy: ["default", "reverse-call", "reverse-call-limit"].includes(saved.strategy)
+      strategy: ["default", "waley", "reverse-call", "reverse-call-limit"].includes(saved.strategy)
         ? saved.strategy
         : "default",
       tradeDirection: ["both", "long", "short"].includes(saved.tradeDirection) ? saved.tradeDirection : "both",
@@ -223,13 +228,29 @@ function setConnection(state, message = "") {
 
 function renderSettings() {
   const timeframeLabel = getTimeframeLabel(settings.timeframe);
+  const isWaley = settings.strategy === "waley";
   elements.thresholdDisplay.innerHTML = `${settings.threshold.toFixed(1)}<span class="stat-unit">%</span>`;
   elements.timeframeInput.value = settings.timeframe;
-  elements.scannerDescription.textContent = `Large ${timeframeLabel} moves across Binance USD-M perpetuals.`;
-  elements.emptyDescription.textContent =
-    `Alerts will appear here when a ${timeframeLabel} candle moves up or down beyond your threshold.`;
+  elements.scannerDescription.textContent = isWaley
+    ? `Live ${timeframeLabel} candle moves across Binance USD-M perpetuals.`
+    : `Large ${timeframeLabel} moves across Binance USD-M perpetuals.`;
+  elements.emptyDescription.textContent = isWaley
+    ? `Alerts will appear when a ${timeframeLabel} candle moves beyond your threshold, even before it closes.`
+    : `Alerts will appear here when a ${timeframeLabel} candle moves up or down beyond your threshold.`;
   elements.marketCoverageDescription.textContent =
     `All active Binance USD-M USDT perpetual contracts, streamed on the ${timeframeLabel} interval. Scanner preferences and alert history are saved in this browser; trading requires the local server.`;
+  elements.moveMetricLabel.textContent = isWaley ? "Low/high-to-current move" : "Open-to-close move";
+  elements.alertsSubtitle.textContent = isWaley
+    ? "Live candles that meet your low/high-to-current move threshold"
+    : "Closed candles that meet your open-to-close move threshold";
+  elements.thresholdDescription.textContent = isWaley
+    ? "For a green candle, measure the rise from its low to its current price; for a red candle, measure the drop from its high."
+    : "Measured from the candle open to its close. Upward and downward moves can trigger alerts.";
+  elements.thresholdNote.textContent = isWaley
+    ? "Waley signals as soon as the selected candle's low-to-current rise or high-to-current drop exceeds the threshold; the candle need not be complete."
+    : "A 5% threshold can trigger on a candle closing at least 5% above or below its open.";
+  elements.strategyDescription.textContent =
+    "Default and Waley trades require buy-initiated volume to exceed sell-initiated volume for a Long, or sell-initiated volume to exceed buy-initiated volume for a Short. Reverse Call strategies trade the opposite direction without this volume filter.";
   elements.thresholdInput.value = String(settings.threshold);
   elements.alertLimitInput.value = String(settings.alertLimit);
   elements.maxOpenTradesInput.value = String(settings.maxOpenTrades);
@@ -246,7 +267,7 @@ function renderSettings() {
 }
 
 function toggleDefaultRoiSettings() {
-  const isDefault = elements.strategyInput.value === "default";
+  const isDefault = ["default", "waley"].includes(elements.strategyInput.value);
   document.querySelectorAll(".default-roi-setting").forEach((setting) => {
     setting.hidden = !isDefault;
   });
@@ -447,7 +468,7 @@ function handleTickers(tickers) {
 }
 
 function exportAlerts() {
-  const headers = ["Contract", "Timeframe", "Candle Move", "24h Change", "Close Price", "PnL %", "Candle Volume (USDT)", "Buy Volume (USDT)", "Sell Volume (USDT)", "Bias", "Closed At", "Trade Status"];
+  const headers = ["Contract", "Timeframe", "Candle Move", "24h Change", "Close Price", "PnL %", "Candle Volume (USDT)", "Buy Volume (USDT)", "Sell Volume (USDT)", "Bias", "Alert Time", "Trade Status"];
   const rows = alerts.map((alert) => [
     alert.symbol,
     alert.timeframe || "1m",
@@ -505,7 +526,8 @@ async function hasRecentClosingPrice(alert) {
 
 function handleKline(message) {
   const candle = message.k;
-  if (!candle || candle.i !== settings.timeframe || candle.x !== true) return;
+  const isWaley = settings.strategy === "waley";
+  if (!candle || candle.i !== settings.timeframe || (!isWaley && candle.x !== true)) return;
 
   const open = Number(candle.o);
   const close = Number(candle.c);
@@ -517,7 +539,7 @@ function handleKline(message) {
       open <= 0 || high <= 0 || low <= 0 || high < low || close === open ||
       quoteVolume <= 0 || takerBuyQuoteVolume < 0 || takerBuyQuoteVolume > quoteVolume) return;
 
-  const movePercent = ((close - open) / open) * 100;
+  const movePercent = window.calculateCandleMovePercent({ open, close, high, low }, settings.strategy);
   if (Math.abs(movePercent) <= settings.threshold) return;
   if (alerts.some((alert) => alert.symbol === candle.s)) return;
 
@@ -539,7 +561,7 @@ function handleKline(message) {
     close,
     quoteVolume,
     takerBuyQuoteVolume,
-    closeTime: candle.T
+    closeTime: candle.x ? candle.T : Date.now()
   };
   alerts.unshift(alert);
   alerts = alerts.slice(0, settings.alertLimit);

@@ -19,6 +19,7 @@ const STOP_LEVEL_BUFFER_PERCENT = 0.1;
 const ALLOWED_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
+  ["/candle-movement.js", ["candle-movement.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]]
 ]);
@@ -75,7 +76,7 @@ function validateConfig(body) {
     throw new Error("Choose a supported trade direction.");
   }
   const strategy = body.strategy ?? "default";
-  if (!["default", "reverse-call", "reverse-call-limit"].includes(strategy)) {
+  if (!["default", "waley", "reverse-call", "reverse-call-limit"].includes(strategy)) {
     throw new Error("Choose a supported trading strategy.");
   }
   if (!["percent", "usdt"].includes(body.marginUnit)) {
@@ -635,12 +636,14 @@ function validateSignal(body) {
   if (tradingConfig.direction !== "both" && tradingConfig.direction.toUpperCase() !== direction) {
     return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "direction-disabled" };
   }
-  const sellQuoteVolume = quoteVolume - takerBuyQuoteVolume;
-  if (direction === "LONG" && takerBuyQuoteVolume <= sellQuoteVolume) {
-    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "buy-volume-not-strong" };
-  }
-  if (direction === "SHORT" && sellQuoteVolume <= takerBuyQuoteVolume) {
-    return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "sell-volume-not-strong" };
+  if (tradingConfig.strategy === "default" || tradingConfig.strategy === "waley") {
+    const sellQuoteVolume = quoteVolume - takerBuyQuoteVolume;
+    if (direction === "LONG" && takerBuyQuoteVolume <= sellQuoteVolume) {
+      return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "buy-volume-not-strong" };
+    }
+    if (direction === "SHORT" && sellQuoteVolume <= takerBuyQuoteVolume) {
+      return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: "sell-volume-not-strong" };
+    }
   }
   if (!tradingConfig.marginAmount) throw apiError("Set the order margin in Settings before trading.", 409);
   if (!tradingConfig.apiKey || !tradingConfig.apiSecret) {
@@ -879,7 +882,7 @@ async function placeSignalOrder(body) {
       ...(positionSide ? { positionSide } : {})
     });
     const protectiveOrders = [];
-    if (tradingConfig.strategy === "default") {
+    if (tradingConfig.strategy === "default" || tradingConfig.strategy === "waley") {
       if (tradingConfig.takeProfitRoi !== null) {
         protectiveOrders.push({
           type: "TAKE_PROFIT_MARKET",

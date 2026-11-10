@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { calculateCandleMovePercent } = require("./candle-movement");
 const {
   createServer,
   countOpenTrades,
@@ -15,6 +16,12 @@ const {
   hasTradeCapacity,
   validateConfig
 } = require("./server");
+
+test("calculates Default and Waley moves from the correct candle prices", () => {
+  assert.equal(calculateCandleMovePercent({ open: 100, close: 110, high: 112, low: 90 }, "default"), 10);
+  assert.equal(calculateCandleMovePercent({ open: 100, close: 110, high: 112, low: 90 }, "waley"), 22.22222222222222);
+  assert.equal(calculateCandleMovePercent({ open: 100, close: 90, high: 120, low: 88 }, "waley"), -25);
+});
 
 test("formats market quantities down to Binance step size", () => {
   assert.equal(formatQuantity(1.239, "0.01"), "1.23");
@@ -44,6 +51,8 @@ test("places stops beyond confirmed 1-minute support and resistance", () => {
 test("maps candle direction to the selected trading strategy", () => {
   assert.equal(getTradeDirection("LONG", "default"), "LONG");
   assert.equal(getTradeDirection("SHORT", "default"), "SHORT");
+  assert.equal(getTradeDirection("LONG", "waley"), "LONG");
+  assert.equal(getTradeDirection("SHORT", "waley"), "SHORT");
   assert.equal(getTradeDirection("LONG", "reverse-call"), "SHORT");
   assert.equal(getTradeDirection("SHORT", "reverse-call"), "LONG");
   assert.equal(getTradeDirection("LONG", "reverse-call-limit"), "SHORT");
@@ -104,6 +113,7 @@ test("validates the maximum open trade setting", () => {
   assert.throws(() => validateConfig({ ...config, strategy: "unknown" }), /supported trading strategy/);
   assert.doesNotThrow(() => validateConfig({ ...config, maxOpenTrades: 5 }));
   assert.equal(validateConfig({ ...config, strategy: "reverse-call-limit" }).strategy, "reverse-call-limit");
+  assert.equal(validateConfig({ ...config, strategy: "waley" }).strategy, "waley");
   assert.equal(validateConfig(config).strategy, "default");
   assert.equal(validateConfig({ ...config, takeProfitRoi: 30, stopLossRoi: -30 }).takeProfitRoi, 30);
   assert.equal(validateConfig({ ...config, takeProfitRoi: "", stopLossRoi: null }).stopLossRoi, null);
@@ -161,11 +171,16 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.equal(page.status, 200);
   const pageContent = await page.text();
   assert.match(pageContent, /Wickwatch/);
+  assert.match(pageContent, /candle-movement\.js/);
   assert.match(pageContent, /id="max-open-trades-input"[^>]*value="15"/);
   assert.match(pageContent, /id="strategy-input"/);
   assert.match(pageContent, /id="take-profit-roi-input"/);
   assert.match(pageContent, /id="stop-loss-roi-input"[^>]*value="-10"/);
   assert.match(pageContent, /value="reverse-call-limit">Reverse call with limit/);
+  assert.match(pageContent, /value="waley">Waley Strategy/);
+
+  const movementScript = await fetch(`${baseUrl}/candle-movement.js`);
+  assert.equal(movementScript.status, 200);
 
   const rejected = await fetch(`${baseUrl}/api/trading/status`, {
     headers: { Origin: "https://untrusted.example" }
@@ -337,7 +352,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       mode: "demo",
-      strategy: "reverse-call-limit",
+      strategy: "default",
       direction: "both",
       marginAmount: 5,
       marginUnit: "usdt",
@@ -357,7 +372,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       symbol: "TESTUSDT",
-      direction: "LONG",
+      direction: "SHORT",
       signalId: "weak-short-volume",
       candleHigh: 100,
       candleLow: 90,
@@ -373,7 +388,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       symbol: "TESTUSDT",
-      direction: "SHORT",
+      direction: "LONG",
       signalId: "weak-long-volume",
       candleHigh: 100,
       candleLow: 90,
@@ -398,6 +413,54 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   });
   assert.equal(invalidVolumes.status, 400);
 
+  const waleyConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "waley",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      maxOpenTrades: 5,
+      apiKey: "test-key",
+      apiSecret: "test-secret"
+    })
+  });
+  assert.equal(waleyConfig.status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+  const waleyWeakForLong = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "waley-weak-long-volume",
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 40
+    })
+  });
+  assert.equal(waleyWeakForLong.status, 200);
+  assert.deepEqual(await waleyWeakForLong.json(), { status: "skipped", reason: "buy-volume-not-strong" });
+  assert.equal(requestSequence.length, initialRequestCount);
+
+  const reverseLimitConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "reverse-call-limit",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      maxOpenTrades: 5,
+      apiKey: "test-key",
+      apiSecret: "test-secret"
+    })
+  });
+  assert.equal(reverseLimitConfig.status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+
   const response = await fetch(`${baseUrl}/api/trading/signal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -408,7 +471,7 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
       candleHigh: 0.0000005,
       candleLow: 0.0000004,
       quoteVolume: 100,
-      takerBuyQuoteVolume: 40
+      takerBuyQuoteVolume: 60
     })
   });
   assert.equal(response.status, 200);
