@@ -104,7 +104,7 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .connection-indicator.error { background: #f27b72; box-shadow: 0 0 9px rgba(242, 123, 114, .4); }
 .topbar-divider { width: 1px; height: 15px; margin: 0 8px; background: #2a3330; }
 .timeframe-badge { display: flex; align-items: center; gap: 7px; color: #b6c0b9; }
-.timeframe-badge span { width: 5px; height: 5px; border-radius: 1px; background: var(--accent); }
+.timeframe-badge > span:first-child { width: 5px; height: 5px; border-radius: 1px; background: var(--accent); }
 
 .page { padding-top: 43px; animation: page-in .24s ease-out; }
 .page[hidden] { display: none; }
