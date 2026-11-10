@@ -10,7 +10,7 @@ const DEFAULT_STOP_LOSS_ROI = -10;
 const SUBSCRIPTION_BATCH_SIZE = 100;
 const SUBSCRIPTION_INTERVAL_MS = 250;
 const REVERSE_CALL_LOOKBACK_MINUTES = 120;
-const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "8h", "1d"];
+const TIMEFRAMES = ["1m", "3m", "5m", "15m", "1h", "4h", "8h", "1d"];
 
 const elements = {
   connectionIndicator: document.querySelector("#connection-indicator"),
@@ -29,6 +29,7 @@ const elements = {
   thresholdNote: document.querySelector("#threshold-note"),
   strategyDescription: document.querySelector("#strategy-description"),
   timeframeInput: document.querySelector("#timeframe-input"),
+  timeframeBadgeLabel: document.querySelector("#timeframe-badge-label"),
   lastUpdated: document.querySelector("#last-updated"),
   alertsBody: document.querySelector("#alerts-body"),
   emptyState: document.querySelector("#empty-state"),
@@ -231,6 +232,7 @@ function renderSettings() {
   const isWaley = settings.strategy === "waley";
   elements.thresholdDisplay.innerHTML = `${settings.threshold.toFixed(1)}<span class="stat-unit">%</span>`;
   elements.timeframeInput.value = settings.timeframe;
+  elements.timeframeBadgeLabel.textContent = `${settings.timeframe.toUpperCase()} TIMEFRAME`;
   elements.scannerDescription.textContent = isWaley
     ? `Live ${timeframeLabel} candle moves across Binance USD-M perpetuals.`
     : `Large ${timeframeLabel} moves across Binance USD-M perpetuals.`;
@@ -316,6 +318,7 @@ function formatCloseTime(timestamp) {
 function getTimeframeLabel(timeframe) {
   return ({
     "1m": "1-minute",
+    "3m": "3-minute",
     "5m": "5-minute",
     "15m": "15-minute",
     "1h": "1-hour",

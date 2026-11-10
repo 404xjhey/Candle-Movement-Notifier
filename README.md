@@ -19,7 +19,7 @@ static web server when using trading.
 ## Scanner
 
 - Scans active USDT perpetual contracts using Binance's public market stream.
-  Choose 1-minute, 5-minute, 15-minute, 1-hour, 4-hour, 8-hour, or 1-day
+  Choose 1-minute, 3-minute, 5-minute, 15-minute, 1-hour, 4-hour, 8-hour, or 1-day
   candles in Settings; the selected interval is saved in browser storage.
 - By default, records a signal when a closed candle's absolute open-to-close move is
   strictly greater than the configured threshold. Upward moves are LONG signals;
