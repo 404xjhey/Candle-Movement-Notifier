@@ -10,6 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
+    <script src="candle-movement.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -89,7 +90,7 @@
             <article class="stat-card threshold-stat">
               <div class="stat-top"><span>MOVE THRESHOLD</span><span class="stat-icon target-icon" aria-hidden="true"></span></div>
               <div class="stat-value" id="threshold-display">5.0<span class="stat-unit">%</span></div>
-              <div class="stat-foot"><span>Open-to-close move</span><button class="text-button" type="button" data-page-link="settings">Adjust</button></div>
+              <div class="stat-foot"><span id="move-metric-label">Open-to-close move</span><button class="text-button" type="button" data-page-link="settings">Adjust</button></div>
             </article>
           </div>
 
@@ -97,7 +98,7 @@
             <div class="panel-heading">
               <div>
                 <div class="panel-title-row"><span class="panel-live-mark"></span><h2 id="alerts-title">Latest alerts</h2><span class="count-pill" id="count-pill">0</span></div>
-                <p class="panel-subtitle">Closed candles that meet your open-to-close move threshold</p>
+                <p class="panel-subtitle" id="alerts-subtitle">Closed candles that meet your open-to-close move threshold</p>
               </div>
               <div class="panel-actions">
                 <button class="export-button" id="export-button" type="button" disabled>
@@ -121,7 +122,7 @@
                     <th scope="col">PNL %</th>
                     <th scope="col">BUY / SELL VOLUME SHARE</th>
                     <th scope="col">BIAS</th>
-                    <th scope="col">CLOSED AT</th>
+                    <th scope="col">ALERT TIME</th>
                     <th scope="col">CLOSE</th>
                   </tr>
                 </thead>
@@ -160,7 +161,7 @@
           <form class="settings-card" id="settings-form">
             <div class="settings-card-heading">
               <div class="settings-symbol range-symbol" aria-hidden="true"><span></span><i></i><b></b></div>
-              <div><h2>Alert conditions</h2>              <p>Choose the minimum open-to-close move for a signal.</p></div>
+              <div><h2>Alert conditions</h2>              <p>Choose the minimum candle move required for a signal.</p></div>
             </div>
             <div class="setting-row">
               <div class="setting-copy">
@@ -180,14 +181,14 @@
             <div class="setting-row range-setting">
               <div class="setting-copy">
                 <label for="threshold-input">Minimum candle move</label>
-                <p>Measured from the candle open to its close. Upward and downward moves can trigger alerts.</p>
+                <p id="threshold-description">Measured from the candle open to its close. Upward and downward moves can trigger alerts.</p>
               </div>
               <div class="threshold-control">
                 <input id="threshold-input" name="threshold" type="number" min="0.1" max="100" step="0.1" value="5" required>
                 <span>%</span>
               </div>
             </div>
-            <div class="setting-note"><span class="note-icon">i</span><span>A 5% threshold can trigger on a candle closing at least 5% above or below its open.</span></div>
+            <div class="setting-note"><span class="note-icon">i</span><span id="threshold-note">A 5% threshold can trigger on a candle closing at least 5% above or below its open.</span></div>
 
             <div class="setting-row alert-limit-setting">
               <div class="setting-copy">
@@ -203,7 +204,7 @@
             <div class="setting-row notification-setting">
               <div class="setting-copy">
                 <label for="notifications-input">Browser notifications</label>
-                <p>Show a desktop notification when a qualifying candle closes.</p>
+                <p>Show a desktop notification when a candle meets the selected move threshold.</p>
               </div>
               <label class="toggle">
                 <input id="notifications-input" name="notifications" type="checkbox">
@@ -219,10 +220,11 @@
             <div class="setting-row">
               <div class="setting-copy">
                 <label for="strategy-input">Trading strategy</label>
-                <p>Each trade requires buy-initiated volume to exceed sell-initiated volume for a Long, or sell-initiated volume to exceed buy-initiated volume for a Short. Default follows the candle direction; Reverse Call strategies trade the opposite direction.</p>
+                <p id="strategy-description">Each trade requires buy-initiated volume to exceed sell-initiated volume for a Long, or sell-initiated volume to exceed buy-initiated volume for a Short. Default follows the candle direction; Reverse Call strategies trade the opposite direction.</p>
               </div>
               <select id="strategy-input" name="strategy" class="settings-select">
                 <option value="default">Default</option>
+                <option value="waley">Waley Strategy</option>
                 <option value="reverse-call">Reverse Call</option>
                 <option value="reverse-call-limit">Reverse call with limit</option>
               </select>
@@ -230,7 +232,7 @@
             <div class="setting-row default-roi-setting">
               <div class="setting-copy">
                 <label for="take-profit-roi-input">Take-profit ROI</label>
-                <p>For Default trades, close at this positive ROI percentage. Leave blank to disable take-profit.</p>
+                <p>For Default and Waley trades, close at this positive ROI percentage. Leave blank to disable take-profit.</p>
               </div>
               <div class="threshold-control">
                 <input id="take-profit-roi-input" name="takeProfitRoi" type="number" step="any" placeholder="Optional">

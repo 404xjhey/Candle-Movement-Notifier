@@ -1,7 +1,7 @@
 # Wickwatch
 
-Wickwatch scans Binance USD-M Futures for closed candles on a configurable
-interval whose absolute open-to-close move exceeds your threshold. It can
+Wickwatch scans Binance USD-M Futures candles on a configurable interval whose
+move exceeds your threshold. It can
 optionally send orders to Binance Demo or Live Futures.
 
 ## Run locally
@@ -21,11 +21,16 @@ static web server when using trading.
 - Scans active USDT perpetual contracts using Binance's public market stream.
   Choose 1-minute, 5-minute, 15-minute, 1-hour, 4-hour, 8-hour, or 1-day
   candles in Settings; the selected interval is saved in browser storage.
-- Records a signal when a closed candle's absolute open-to-close move is
+- By default, records a signal when a closed candle's absolute open-to-close move is
   strictly greater than the configured threshold. Upward moves are LONG signals;
   downward moves are SHORT signals.
+- With **Waley Strategy** selected, evaluates every update of the selected
+  candle interval, including candles that are still forming. Green candles use
+  the rise from low to current price; red candles use the drop from high to
+  current price. A signal is recorded when the absolute move strictly exceeds
+  the threshold.
 - Shows the move, 24-hour change, close price, directional PnL from the signal
-  close, buy/sell volume shares, signal bias, close time, trade status, and a
+  close, buy/sell volume shares, signal bias, alert time, trade status, and a
   per-row CLOSE button when a position is open. Buy and sell volume are based
   on Binance's taker-buy quote volume and the remainder of total quote volume.
 - Removes a token's alert from Latest Alerts after a previously observed
@@ -50,18 +55,22 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    orders. New orders are rejected when the cap is reached.
    A percentage margin uses available USDT margin; a fixed amount uses USDT.
    Position notional is margin multiplied by **5x leverage**.
-   An order is placed only when taker-initiated volume for its resulting
-   direction is greater than the opposing volume in the closed candle. Long
-   entries require stronger buy volume; Short entries require stronger sell
-   volume. Reverse Call strategies apply this condition to their opposite-side
-   order direction. Equal buy and sell volume does not qualify.
+   **Default** and **Waley Strategy** place an order only when taker-initiated
+   volume for its direction is greater than the opposing volume in the
+   qualifying candle. Long entries require stronger buy volume; Short entries
+   require stronger sell volume. Equal buy and sell volume does not qualify.
+   Reverse Call strategies do not apply this volume filter.
    **Default** follows the candle direction (green = long, red = short).
+   **Waley Strategy** also follows the candle direction, but measures the
+   threshold from the candle low to current price for Longs and from candle
+   high to current price for Shorts. It can signal before the selected candle
+   closes.
    Long and short positions use the nearest strong support/resistance from 60
    completed 1-minute candles for the exchange-hosted stop-loss: support for
    Long, resistance for Short. A strong level requires at least two confirmed
    swing-pivot touches within 0.15%; the stop is placed 0.1% beyond the level.
    If no strong level is available, the configured negative **Fallback
-   stop-loss ROI** is used (default `-10`). Default trades can also use an
+   stop-loss ROI** is used (default `-10`). Default and Waley trades can also use an
    optional positive **Take-profit ROI**. Take-profit ROI is converted to an
    exchange-hosted mark-price trigger at 5x leverage, before fees and funding.
    Wickwatch submits the entry first, then calculates and places its protective
