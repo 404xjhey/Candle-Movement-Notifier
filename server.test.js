@@ -1,12 +1,13 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { calculateCandleMovePercent } = require("./candle-movement");
+const { calculateCandleMovePercent, calculateEma } = require("./candle-movement");
 const {
   createServer,
   countOpenTrades,
   formatPrice,
   formatQuantity,
   getLimitEntryPrice,
+  getJMinuteLimitPrices,
   getRoiTriggerPrice,
   getSupportResistanceStopPrice,
   getStopLossPrice,
@@ -21,6 +22,13 @@ test("calculates Default and Waley moves from the correct candle prices", () => 
   assert.equal(calculateCandleMovePercent({ open: 100, close: 110, high: 112, low: 90 }, "default"), 10);
   assert.equal(calculateCandleMovePercent({ open: 100, close: 110, high: 112, low: 90 }, "waley"), 22.22222222222222);
   assert.equal(calculateCandleMovePercent({ open: 100, close: 90, high: 120, low: 88 }, "waley"), -25);
+});
+
+test("calculates EMA 200 and rejects insufficient or invalid history", () => {
+  assert.ok(Math.abs(calculateEma(Array(200).fill(100), 200) - 100) < 1e-9);
+  assert.equal(calculateEma([1, 2, 3], 2), 2.5);
+  assert.equal(calculateEma(Array(199).fill(100), 200), null);
+  assert.equal(calculateEma([...Array(199).fill(100), 0], 200), null);
 });
 
 test("formats market quantities down to Binance step size", () => {
@@ -57,6 +65,8 @@ test("maps candle direction to the selected trading strategy", () => {
   assert.equal(getTradeDirection("SHORT", "reverse-call"), "LONG");
   assert.equal(getTradeDirection("LONG", "reverse-call-limit"), "SHORT");
   assert.equal(getTradeDirection("SHORT", "reverse-call-limit"), "LONG");
+  assert.equal(getTradeDirection("LONG", "j-minute-rule"), "LONG");
+  assert.equal(getTradeDirection("SHORT", "j-minute-rule"), "SHORT");
 });
 
 test("prices reverse-call limit entries from candle extremes and rounds toward the limit", () => {
@@ -64,6 +74,18 @@ test("prices reverse-call limit entries from candle extremes and rounds toward t
   assert.equal(getLimitEntryPrice("SHORT", 100, 95, "0.01"), "92.62");
   assert.equal(formatPrice(102.501, "0.01", "up"), "102.51");
   assert.equal(formatPrice(92.629, "0.01", "down"), "92.62");
+});
+
+test("rounds J-minute-Rule entries and stop-losses to valid directional ticks", () => {
+  assert.deepEqual(getJMinuteLimitPrices("LONG", 100.019, 98.999, "0.01"), {
+    entryPrice: "100.01",
+    stopLossPrice: "98.99"
+  });
+  assert.deepEqual(getJMinuteLimitPrices("SHORT", 100.019, 102.001, "0.01"), {
+    entryPrice: "100.02",
+    stopLossPrice: "102.01"
+  });
+  assert.throws(() => getJMinuteLimitPrices("LONG", 100, 101, "0.01"), /Invalid J-minute-Rule/);
 });
 
 test("sets stop triggers at approximately 50% PnL loss using 5x leverage", () => {
@@ -114,6 +136,7 @@ test("validates the maximum open trade setting", () => {
   assert.doesNotThrow(() => validateConfig({ ...config, maxOpenTrades: 5 }));
   assert.equal(validateConfig({ ...config, strategy: "reverse-call-limit" }).strategy, "reverse-call-limit");
   assert.equal(validateConfig({ ...config, strategy: "waley" }).strategy, "waley");
+  assert.equal(validateConfig({ ...config, strategy: "j-minute-rule" }).strategy, "j-minute-rule");
   assert.equal(validateConfig(config).strategy, "default");
   assert.equal(validateConfig({ ...config, takeProfitRoi: 30, stopLossRoi: -30 }).takeProfitRoi, 30);
   assert.equal(validateConfig({ ...config, takeProfitRoi: "", stopLossRoi: null }).stopLossRoi, null);
@@ -178,6 +201,9 @@ test("serves the dashboard locally and rejects foreign origins", async (context)
   assert.match(pageContent, /id="stop-loss-roi-input"[^>]*value="-10"/);
   assert.match(pageContent, /value="reverse-call-limit">Reverse call with limit/);
   assert.match(pageContent, /value="waley">Waley Strategy/);
+  assert.match(pageContent, /value="j-minute-rule">J-minute-Rule/);
+  assert.match(pageContent, /id="change-min-input"[^>]*value="-10"/);
+  assert.match(pageContent, /id="change-max-input"[^>]*value="10"/);
 
   const movementScript = await fetch(`${baseUrl}/candle-movement.js`);
   assert.equal(movementScript.status, 200);
@@ -675,4 +701,50 @@ test("submits small limit prices as tick-formatted decimals", async (context) =>
   assert.equal(alreadyReachedResult.protectionExit.roi > 30, true);
   assert.equal(submittedOrder.reduceOnly, "true");
   assert.equal(positionIsOpen, false);
+
+  const jMinuteConfig = await fetch(`${baseUrl}/api/trading/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "demo",
+      strategy: "j-minute-rule",
+      direction: "both",
+      marginAmount: 5,
+      marginUnit: "usdt",
+      maxOpenTrades: 5,
+      apiKey: "test-key",
+      apiSecret: "test-secret"
+    })
+  });
+  assert.equal(jMinuteConfig.status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/trading/start`, { method: "POST" })).status, 200);
+  const jMinuteSignal = await fetch(`${baseUrl}/api/trading/signal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: "TESTUSDT",
+      direction: "LONG",
+      signalId: "j-minute-limit-entry",
+      candleHigh: 0.00000055,
+      candleLow: 0.00000050,
+      entryPrice: 0.00000050,
+      stopLossPrice: 0.00000045,
+      quoteVolume: 100,
+      takerBuyQuoteVolume: 40
+    })
+  });
+  assert.equal(jMinuteSignal.status, 200);
+  const jMinuteResult = await jMinuteSignal.json();
+  assert.equal(jMinuteResult.status, "placed");
+  assert.equal(jMinuteResult.orderType, "LIMIT");
+  assert.equal(submittedOrder.type, "LIMIT");
+  assert.equal(submittedOrder.price, "0.00000050");
+
+  positionIsOpen = true;
+  const jMinutePositions = await fetch(`${baseUrl}/api/trading/positions`);
+  assert.equal(jMinutePositions.status, 200);
+  const jMinutePositionResult = await jMinutePositions.json();
+  assert.equal(jMinutePositionResult.protectionOrders[0].triggerPrice, 0.00000045);
+  assert.equal(jMinutePositionResult.protectionOrders[0].source, "minimum candle");
+  assert.equal(submittedStops.at(-1).triggerPrice, "0.00000045");
 });

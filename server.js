@@ -76,7 +76,7 @@ function validateConfig(body) {
     throw new Error("Choose a supported trade direction.");
   }
   const strategy = body.strategy ?? "default";
-  if (!["default", "waley", "reverse-call", "reverse-call-limit"].includes(strategy)) {
+  if (!["default", "waley", "reverse-call", "reverse-call-limit", "j-minute-rule"].includes(strategy)) {
     throw new Error("Choose a supported trading strategy.");
   }
   if (!["percent", "usdt"].includes(body.marginUnit)) {
@@ -626,10 +626,18 @@ function validateSignal(body) {
       takerBuyQuoteVolume < 0 || takerBuyQuoteVolume > quoteVolume) {
     throw apiError("Valid candle quote and taker-buy volumes are required.");
   }
-  if (tradingConfig.strategy === "reverse-call-limit" &&
+  if (tradingConfig.strategy === "j-minute-rule" &&
+      (!Number.isFinite(Number(body.entryPrice)) || Number(body.entryPrice) <= 0 ||
+        !Number.isFinite(Number(body.stopLossPrice)) || Number(body.stopLossPrice) <= 0 ||
+        (candleDirection === "LONG"
+          ? Number(body.stopLossPrice) >= Number(body.entryPrice)
+          : Number(body.stopLossPrice) <= Number(body.entryPrice)))) {
+    throw apiError("Valid J-minute-Rule entry and stop-loss prices are required.");
+  }
+  if (["reverse-call-limit", "j-minute-rule"].includes(tradingConfig.strategy) &&
       (!Number.isFinite(candleHigh) || candleHigh <= 0 ||
         !Number.isFinite(candleLow) || candleLow <= 0 || candleHigh < candleLow)) {
-    throw apiError("Valid candle high and low prices are required for Reverse call with limit.");
+    throw apiError("Valid candle high and low prices are required for limit entries.");
   }
   if (!tradingConfig.enabled) throw apiError("Automatic trading is disabled in Settings.", 409);
   const direction = getTradeDirection(candleDirection, tradingConfig.strategy);
@@ -649,7 +657,17 @@ function validateSignal(body) {
   if (!tradingConfig.apiKey || !tradingConfig.apiSecret) {
     throw apiError("Configure a Binance API key and secret in Settings first.", 409);
   }
-  return { symbol, direction, signalId, candleDirection, candleHigh, candleLow, skipped: false };
+  return {
+    symbol,
+    direction,
+    signalId,
+    candleDirection,
+    candleHigh,
+    candleLow,
+    entryPrice: Number(body.entryPrice),
+    stopLossPrice: Number(body.stopLossPrice),
+    skipped: false
+  };
 }
 
 function getTradeDirection(candleDirection, strategy) {
@@ -683,6 +701,26 @@ function getLimitEntryPrice(candleDirection, candleHigh, candleLow, tickSize) {
   return formatPrice(targetPrice, tickSize, isGreenCandle ? "up" : "down");
 }
 
+function getJMinuteLimitPrices(direction, entryPrice, stopLossPrice, tickSize) {
+  if (!["LONG", "SHORT"].includes(direction) ||
+      !Number.isFinite(entryPrice) || entryPrice <= 0 ||
+      !Number.isFinite(stopLossPrice) || stopLossPrice <= 0 ||
+      (direction === "LONG" ? stopLossPrice >= entryPrice : stopLossPrice <= entryPrice)) {
+    throw apiError("Invalid J-minute-Rule entry or stop-loss price.");
+  }
+  const rounding = direction === "LONG" ? "down" : "up";
+  const prices = {
+    entryPrice: formatPrice(entryPrice, tickSize, rounding),
+    stopLossPrice: formatPrice(stopLossPrice, tickSize, rounding)
+  };
+  if (direction === "LONG"
+    ? Number(prices.stopLossPrice) >= Number(prices.entryPrice)
+    : Number(prices.stopLossPrice) <= Number(prices.entryPrice)) {
+    throw apiError("J-minute-Rule entry and stop-loss prices must be separated by at least one price tick.");
+  }
+  return prices;
+}
+
 function getStopLossPrice(direction, entryPrice, tickSize) {
   if (!["LONG", "SHORT"].includes(direction)) throw apiError("Invalid trade direction.");
   const adverseMove = STOP_LOSS_PNL_PERCENT / (LEVERAGE * 100);
@@ -703,7 +741,8 @@ async function placeSignalOrder(body) {
   inFlightSignals.add(signal.signalId);
   inFlightSymbols.add(signal.symbol);
   try {
-    const usesLimitEntry = tradingConfig.strategy === "reverse-call-limit";
+    const usesJMinuteEntry = tradingConfig.strategy === "j-minute-rule";
+    const usesLimitEntry = usesJMinuteEntry || tradingConfig.strategy === "reverse-call-limit";
     const [positions, openOrders] = await Promise.all([
       listPositions(),
       usesLimitEntry ? listOpenOrders() : Promise.resolve([])
@@ -778,9 +817,14 @@ async function placeSignalOrder(body) {
     if (!quantityFilter || !priceFilter || (usesLimitEntry && !limitQuantityFilter)) {
       throw apiError("Binance did not provide the required quantity or price filters for this contract.", 502);
     }
-    const entryPriceText = usesLimitEntry
-      ? getLimitEntryPrice(signal.candleDirection, signal.candleHigh, signal.candleLow, priceFilter.tickSize)
+    const jMinutePrices = usesJMinuteEntry
+      ? getJMinuteLimitPrices(signal.direction, signal.entryPrice, signal.stopLossPrice, priceFilter.tickSize)
       : null;
+    const entryPriceText = usesJMinuteEntry
+      ? jMinutePrices.entryPrice
+      : usesLimitEntry
+        ? getLimitEntryPrice(signal.candleDirection, signal.candleHigh, signal.candleLow, priceFilter.tickSize)
+        : null;
     const entryPrice = usesLimitEntry ? Number(entryPriceText) : currentPrice;
     const orderQuantityFilter = usesLimitEntry ? limitQuantityFilter : quantityFilter;
     const quantity = formatQuantity((margin * LEVERAGE) / entryPrice, orderQuantityFilter.stepSize);
@@ -831,12 +875,19 @@ async function placeSignalOrder(body) {
     const positionSide = dualSide.dualSidePosition ? signal.direction : undefined;
     const orderHash = crypto.createHash("sha256").update(signal.signalId).digest("hex").slice(0, 24);
     const clientOrderId = `ww_${orderHash}`;
-    const stopLossOrder = {
-      type: "STOP_MARKET",
-      levelBased: true,
-      fallbackRoiPercent: tradingConfig.stopLossRoi,
-      clientAlgoId: `ww_sl_${orderHash}`
-    };
+    const stopLossOrder = usesJMinuteEntry
+      ? {
+        type: "STOP_MARKET",
+        triggerPrice: jMinutePrices.stopLossPrice,
+        stopSource: "minimum candle",
+        clientAlgoId: `ww_sl_${orderHash}`
+      }
+      : {
+        type: "STOP_MARKET",
+        levelBased: true,
+        fallbackRoiPercent: tradingConfig.stopLossRoi,
+        clientAlgoId: `ww_sl_${orderHash}`
+      };
     if (usesLimitEntry) {
       if (!tradingConfig.enabled) {
         throw apiError("Automatic trading was disabled before the limit order could be sent.", 409);
@@ -858,7 +909,7 @@ async function placeSignalOrder(body) {
         entryClientOrderId: clientOrderId,
         positionSide,
         waitForPosition: true,
-        refreshLevelOnFill: true,
+        refreshLevelOnFill: !usesJMinuteEntry,
         createdAt: Date.now()
       });
       const result = {
@@ -1133,6 +1184,7 @@ module.exports = {
   hasTradeCapacity,
   formatPrice,
   getLimitEntryPrice,
+  getJMinuteLimitPrices,
   getStopLossPrice,
   validateConfig
 };

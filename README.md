@@ -29,6 +29,15 @@ static web server when using trading.
   the rise from low to current price; red candles use the drop from high to
   current price. A signal is recorded when the absolute move strictly exceeds
   the threshold.
+- **J-minute-Rule** evaluates completed candles only. After a candle exceeds
+  the minimum move, it waits for the next selected-interval candle to close.
+  Longs require the confirmation close above EMA 200 and use that candle's low
+  as the limit entry and the first candle's low as the stop. Shorts require the
+  confirmation close below EMA 200 and use the confirmation high for entry and
+  the first candle's high for the stop. EMA 200 is calculated from selected-
+  interval candles. Only tokens within the configurable 24-hour change range
+  (default -10% to +10%) are shown as alerts or traded. Tokens that fail the
+  EMA, 24-hour change, or valid stop placement checks are not added to alerts.
 - Shows the move, 24-hour change, close price, directional PnL from the signal
   close, buy/sell volume shares, signal bias, alert time, trade status, and a
   per-row CLOSE button when a position is open. Buy and sell volume are based
@@ -59,7 +68,7 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    volume for its direction is greater than the opposing volume in the
    qualifying candle. Long entries require stronger buy volume; Short entries
    require stronger sell volume. Equal buy and sell volume does not qualify.
-   Reverse Call strategies do not apply this volume filter.
+   Reverse Call and **J-minute-Rule** do not apply this volume filter.
    **Default** follows the candle direction (green = long, red = short).
    **Waley Strategy** also follows the candle direction, but measures the
    threshold from the candle low to current price for Longs and from candle
@@ -83,6 +92,9 @@ Trading is disabled by default and starts in **Demo** mode. In Settings:
    candle closes. **Reverse call with limit** places a GTC limit order 2.5%
    beyond the candle high or low. The same 1-minute support/resistance stop is
    installed after the limit position fills.
+   **J-minute-Rule** places its GTC limit order at the confirmation candle's
+   low (Long) or high (Short), then installs the qualifying candle's low/high
+   as the exchange-hosted stop-loss after the limit fills.
    Stop-market execution can slip, especially in fast markets.
    The trade-direction setting filters the resulting order direction for every
    strategy.
