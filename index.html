@@ -191,6 +191,19 @@
             </div>
             <div class="setting-note"><span class="note-icon">i</span><span id="threshold-note">A 5% threshold can trigger on a candle closing at least 5% above or below its open.</span></div>
 
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label for="change-min-input">J-minute-Rule 24-hour change range</label>
+                <p>Only qualify tokens whose 24-hour price change is within this inclusive range. Used by J-minute-Rule.</p>
+              </div>
+              <div class="margin-control">
+                <input id="change-min-input" name="changeMin" type="number" min="-100" max="100" step="0.1" value="-10" aria-label="Minimum 24-hour change percent">
+                <span>to</span>
+                <input id="change-max-input" name="changeMax" type="number" min="-100" max="100" step="0.1" value="10" aria-label="Maximum 24-hour change percent">
+                <span>%</span>
+              </div>
+            </div>
+
             <div class="setting-row alert-limit-setting">
               <div class="setting-copy">
                 <label for="alert-limit-input">Maximum alerts to display</label>
@@ -228,6 +241,7 @@
                 <option value="waley">Waley Strategy</option>
                 <option value="reverse-call">Reverse Call</option>
                 <option value="reverse-call-limit">Reverse call with limit</option>
+                <option value="j-minute-rule">J-minute-Rule</option>
               </select>
             </div>
             <div class="setting-row default-roi-setting">

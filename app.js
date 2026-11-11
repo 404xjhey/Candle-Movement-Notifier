@@ -7,6 +7,8 @@ const MAX_ALERT_LIMIT = 500;
 const DEFAULT_MAX_OPEN_TRADES = 15;
 const MAX_OPEN_TRADES = 100;
 const DEFAULT_STOP_LOSS_ROI = -10;
+const DEFAULT_CHANGE_MIN = -10;
+const DEFAULT_CHANGE_MAX = 10;
 const SUBSCRIPTION_BATCH_SIZE = 100;
 const SUBSCRIPTION_INTERVAL_MS = 250;
 const REVERSE_CALL_LOOKBACK_MINUTES = 120;
@@ -41,6 +43,8 @@ const elements = {
   settingsForm: document.querySelector("#settings-form"),
   thresholdInput: document.querySelector("#threshold-input"),
   alertLimitInput: document.querySelector("#alert-limit-input"),
+  changeMinInput: document.querySelector("#change-min-input"),
+  changeMaxInput: document.querySelector("#change-max-input"),
   maxOpenTradesInput: document.querySelector("#max-open-trades-input"),
   notificationsInput: document.querySelector("#notifications-input"),
   strategyInput: document.querySelector("#strategy-input"),
@@ -76,6 +80,7 @@ let openPositionCount = 0;
 const closingSymbols = new Set();
 const tickerChanges = new Map();
 const tickerPrices = new Map();
+const jMinuteCandidates = new Map();
 let socket;
 let reconnectTimer;
 let subscriptionTimer;
@@ -83,6 +88,7 @@ let positionRefreshTimer;
 let toastTimer;
 let subscriptionIdsAwaitingAck = new Set();
 let allMarketsSubmitted = false;
+let settingsRevision = 0;
 const seenCandles = new Set(alerts.map((alert) => alert.id));
 
 function loadSettings() {
@@ -91,6 +97,8 @@ function loadSettings() {
     const threshold = Number(saved.threshold);
     const alertLimit = Number(saved.alertLimit);
     const maxOpenTrades = Number(saved.maxOpenTrades);
+    const changeMin = Number(saved.changeMin);
+    const changeMax = Number(saved.changeMax);
     return {
       timeframe: TIMEFRAMES.includes(saved.timeframe) ? saved.timeframe : "1m",
       threshold: Number.isFinite(threshold) && threshold >= 0.1 && threshold <= 100 ? threshold : 5,
@@ -100,9 +108,15 @@ function loadSettings() {
       maxOpenTrades: Number.isInteger(maxOpenTrades) && maxOpenTrades >= 1 && maxOpenTrades <= MAX_OPEN_TRADES
         ? maxOpenTrades
         : DEFAULT_MAX_OPEN_TRADES,
+      changeMin: Number.isFinite(changeMin) && changeMin >= -100 && changeMin <= 100
+        ? changeMin
+        : DEFAULT_CHANGE_MIN,
+      changeMax: Number.isFinite(changeMax) && changeMax >= -100 && changeMax <= 100
+        ? changeMax
+        : DEFAULT_CHANGE_MAX,
       notifications: saved.notifications === true,
       tradeMode: saved.tradeMode === "live" ? "live" : "demo",
-      strategy: ["default", "waley", "reverse-call", "reverse-call-limit"].includes(saved.strategy)
+      strategy: ["default", "waley", "reverse-call", "reverse-call-limit", "j-minute-rule"].includes(saved.strategy)
         ? saved.strategy
         : "default",
       tradeDirection: ["both", "long", "short"].includes(saved.tradeDirection) ? saved.tradeDirection : "both",
@@ -123,6 +137,8 @@ function loadSettings() {
       threshold: 5,
       alertLimit: DEFAULT_ALERT_LIMIT,
       maxOpenTrades: DEFAULT_MAX_OPEN_TRADES,
+      changeMin: DEFAULT_CHANGE_MIN,
+      changeMax: DEFAULT_CHANGE_MAX,
       notifications: false,
       tradeMode: "demo",
       strategy: "default",
@@ -230,32 +246,44 @@ function setConnection(state, message = "") {
 function renderSettings() {
   const timeframeLabel = getTimeframeLabel(settings.timeframe);
   const isWaley = settings.strategy === "waley";
+  const isJMinuteRule = settings.strategy === "j-minute-rule";
   elements.thresholdDisplay.innerHTML = `${settings.threshold.toFixed(1)}<span class="stat-unit">%</span>`;
   elements.timeframeInput.value = settings.timeframe;
   elements.timeframeBadgeLabel.textContent = `${settings.timeframe.toUpperCase()} TIMEFRAME`;
-  elements.scannerDescription.textContent = isWaley
-    ? `Live ${timeframeLabel} candle moves across Binance USD-M perpetuals.`
-    : `Large ${timeframeLabel} moves across Binance USD-M perpetuals.`;
-  elements.emptyDescription.textContent = isWaley
-    ? `Alerts will appear when a ${timeframeLabel} candle moves beyond your threshold, even before it closes.`
-    : `Alerts will appear here when a ${timeframeLabel} candle moves up or down beyond your threshold.`;
+  elements.scannerDescription.textContent = isJMinuteRule
+    ? `J-minute-Rule waits for a confirming ${timeframeLabel} candle and filters by EMA 200 and 24-hour change.`
+    : isWaley
+      ? `Live ${timeframeLabel} candle moves across Binance USD-M perpetuals.`
+      : `Large ${timeframeLabel} moves across Binance USD-M perpetuals.`;
+  elements.emptyDescription.textContent = isJMinuteRule
+    ? `A qualifying move must be followed by a completed candle and pass the EMA 200 and 24-hour change filters.`
+    : isWaley
+      ? `Alerts will appear when a ${timeframeLabel} candle moves beyond your threshold, even before it closes.`
+      : `Alerts will appear here when a ${timeframeLabel} candle moves up or down beyond your threshold.`;
   elements.marketCoverageDescription.textContent =
     `All active Binance USD-M USDT perpetual contracts, streamed on the ${timeframeLabel} interval. Scanner preferences and alert history are saved in this browser; trading requires the local server.`;
   elements.moveMetricLabel.textContent = isWaley ? "Low/high-to-current move" : "Open-to-close move";
-  elements.alertsSubtitle.textContent = isWaley
-    ? "Live candles that meet your low/high-to-current move threshold"
-    : "Closed candles that meet your open-to-close move threshold";
+  elements.alertsSubtitle.textContent = isJMinuteRule
+    ? "Minimum-move candles shown only after the next candle and filters qualify"
+    : isWaley
+      ? "Live candles that meet your low/high-to-current move threshold"
+      : "Closed candles that meet your open-to-close move threshold";
   elements.thresholdDescription.textContent = isWaley
     ? "For a green candle, measure the rise from its low to its current price; for a red candle, measure the drop from its high."
     : "Measured from the candle open to its close. Upward and downward moves can trigger alerts.";
-  elements.thresholdNote.textContent = isWaley
-    ? "Waley signals as soon as the selected candle's low-to-current rise or high-to-current drop exceeds the threshold; the candle need not be complete."
-    : "A 5% threshold can trigger on a candle closing at least 5% above or below its open.";
-  elements.strategyDescription.textContent =
-    "Default and Waley trades require buy-initiated volume to exceed sell-initiated volume for a Long, or sell-initiated volume to exceed buy-initiated volume for a Short. Reverse Call strategies trade the opposite direction without this volume filter.";
+  elements.thresholdNote.textContent = isJMinuteRule
+    ? "J-minute-Rule waits for the next selected-interval candle to close. Long entry/stop use the next candle low and trigger candle low; Short uses the two highs."
+    : isWaley
+      ? "Waley signals as soon as the selected candle's low-to-current rise or high-to-current drop exceeds the threshold; the candle need not be complete."
+      : "A 5% threshold can trigger on a candle closing at least 5% above or below its open.";
+  elements.strategyDescription.textContent = isJMinuteRule
+    ? "J-minute-Rule places a limit entry at the next candle's low for Long or high for Short, with a stop at the qualifying candle's low/high. Long requires price above EMA 200; Short requires price below EMA 200. Only the configured 24-hour change range qualifies."
+    : "Default and Waley trades require buy-initiated volume to exceed sell-initiated volume for a Long, or sell-initiated volume to exceed buy-initiated volume for a Short. Reverse Call strategies trade the opposite direction without this volume filter.";
   elements.thresholdInput.value = String(settings.threshold);
   elements.alertLimitInput.value = String(settings.alertLimit);
   elements.maxOpenTradesInput.value = String(settings.maxOpenTrades);
+  elements.changeMinInput.value = String(settings.changeMin);
+  elements.changeMaxInput.value = String(settings.changeMax);
   elements.notificationsInput.checked = settings.notifications;
   elements.strategyInput.value = settings.strategy;
   elements.tradeDirectionInput.value = settings.tradeDirection;
@@ -530,7 +558,9 @@ async function hasRecentClosingPrice(alert) {
 function handleKline(message) {
   const candle = message.k;
   const isWaley = settings.strategy === "waley";
-  if (!candle || candle.i !== settings.timeframe || (!isWaley && candle.x !== true)) return;
+  const isJMinuteRule = settings.strategy === "j-minute-rule";
+  if (!candle || candle.i !== settings.timeframe ||
+      (!isWaley && candle.x !== true) || (isJMinuteRule && candle.x !== true)) return;
 
   const open = Number(candle.o);
   const close = Number(candle.c);
@@ -543,10 +573,48 @@ function handleKline(message) {
       quoteVolume <= 0 || takerBuyQuoteVolume < 0 || takerBuyQuoteVolume > quoteVolume) return;
 
   const movePercent = window.calculateCandleMovePercent({ open, close, high, low }, settings.strategy);
+  const id = `${candle.s}:${settings.timeframe}:${candle.t}`;
+  if (isJMinuteRule) {
+    const pending = jMinuteCandidates.get(candle.s);
+    if (pending) {
+      jMinuteCandidates.delete(candle.s);
+      if (candle.t === pending.openTime + getTimeframeMilliseconds(settings.timeframe)) {
+        void qualifyJMinuteCandidate(pending, {
+          openTime: candle.t,
+          closeTime: candle.T,
+          open,
+          close,
+          high,
+          low,
+          quoteVolume,
+          takerBuyQuoteVolume
+        });
+      } else if (candle.t < pending.openTime + getTimeframeMilliseconds(settings.timeframe)) {
+        jMinuteCandidates.set(candle.s, pending);
+      }
+    }
+    if (Math.abs(movePercent) > settings.threshold && !seenCandles.has(id)) {
+      seenCandles.add(id);
+      jMinuteCandidates.set(candle.s, {
+        id,
+        symbol: candle.s,
+        timeframe: settings.timeframe,
+        movePercent,
+        direction: movePercent > 0 ? "LONG" : "SHORT",
+        high,
+        low,
+        openTime: candle.t,
+        close,
+        quoteVolume,
+        takerBuyQuoteVolume,
+        closeTime: candle.T
+      });
+    }
+    return;
+  }
   if (Math.abs(movePercent) <= settings.threshold) return;
   if (alerts.some((alert) => alert.symbol === candle.s)) return;
 
-  const id = `${candle.s}:${settings.timeframe}:${candle.t}`;
   if (seenCandles.has(id)) return;
   seenCandles.add(id);
 
@@ -573,6 +641,99 @@ function handleKline(message) {
   elements.lastUpdated.textContent = `Last signal ${formatCloseTime(alert.closeTime)}`;
   notify(alert);
   if (settings.tradingEnabled) void executeSignal(alert);
+}
+
+function getTimeframeMilliseconds(timeframe) {
+  const units = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+  const value = Number.parseInt(timeframe, 10);
+  const unit = timeframe.slice(-1);
+  return value * units[unit];
+}
+
+async function qualifyJMinuteCandidate(candidate, confirmation) {
+  const revision = settingsRevision;
+  const changeMin = settings.changeMin;
+  const changeMax = settings.changeMax;
+  const removeExistingAlert = () => {
+    const previousCount = alerts.length;
+    alerts = alerts.filter((alert) => alert.symbol !== candidate.symbol);
+    if (alerts.length !== previousCount) {
+      saveAlerts();
+      renderAlerts();
+    }
+  };
+  try {
+    let changePercent = tickerChanges.get(candidate.symbol);
+    if (!Number.isFinite(changePercent)) {
+      const tickerUrl = new URL(`${API_BASE}/fapi/v1/ticker/24hr`);
+      tickerUrl.searchParams.set("symbol", candidate.symbol);
+      const tickerResponse = await fetch(tickerUrl);
+      if (!tickerResponse.ok) throw new Error(`24-hour ticker request failed (${tickerResponse.status}).`);
+      const ticker = await tickerResponse.json();
+      changePercent = Number(ticker.priceChangePercent);
+    }
+    if (revision !== settingsRevision || settings.strategy !== "j-minute-rule") return;
+    const candleUrl = new URL(`${API_BASE}/fapi/v1/klines`);
+    candleUrl.search = new URLSearchParams({
+      symbol: candidate.symbol,
+      interval: candidate.timeframe,
+      endTime: String(confirmation.openTime - 1),
+      limit: "250"
+    });
+    const candleResponse = await fetch(candleUrl);
+    if (!candleResponse.ok) throw new Error(`EMA 200 candle history request failed (${candleResponse.status}).`);
+    const history = await candleResponse.json();
+    if (!Array.isArray(history) || history.length < 200 ||
+        history.some((row) => !Array.isArray(row) || !Number.isFinite(Number(row[4])) || Number(row[4]) <= 0)) {
+      throw new Error("Binance returned insufficient or invalid candle history for EMA 200.");
+    }
+    if (revision !== settingsRevision || settings.strategy !== "j-minute-rule") return;
+    const ema = window.calculateEma(
+      [...history.slice(-250).map((row) => Number(row[4])), confirmation.close],
+      200
+    );
+    if (!Number.isFinite(changePercent) || changePercent < changeMin || changePercent > changeMax ||
+        !Number.isFinite(ema) ||
+        (candidate.direction === "LONG" ? confirmation.close <= ema : confirmation.close >= ema)) {
+      removeExistingAlert();
+      return;
+    }
+
+    const entryPrice = candidate.direction === "LONG" ? confirmation.low : confirmation.high;
+    const stopLossPrice = candidate.direction === "LONG" ? candidate.low : candidate.high;
+    if (candidate.direction === "LONG" ? stopLossPrice >= entryPrice : stopLossPrice <= entryPrice) {
+      removeExistingAlert();
+      return;
+    }
+    removeExistingAlert();
+    const alert = {
+      ...candidate,
+      high: confirmation.high,
+      low: confirmation.low,
+      close: confirmation.close,
+      quoteVolume: confirmation.quoteVolume,
+      takerBuyQuoteVolume: confirmation.takerBuyQuoteVolume,
+      changePercent,
+      ema200: ema,
+      entryPrice,
+      stopLossPrice,
+      confirmationOpenTime: confirmation.openTime,
+      closeTime: confirmation.closeTime,
+      tradeStatus: "not-traded"
+    };
+    alerts.unshift(alert);
+    alerts = alerts.slice(0, settings.alertLimit);
+    saveAlerts();
+    renderAlerts();
+    elements.lastUpdated.textContent = `J-minute-Rule signal ${formatCloseTime(alert.closeTime)}`;
+    notify(alert);
+    if (settings.tradingEnabled) void executeSignal(alert);
+  } catch (error) {
+    if (revision !== settingsRevision || settings.strategy !== "j-minute-rule") return;
+    removeExistingAlert();
+    console.error(`Could not qualify J-minute-Rule signal for ${candidate.symbol}.`, error);
+    showToast(`J-minute-Rule skipped ${candidate.symbol}: ${error.message}`);
+  }
 }
 
 function getTradeStatusLabel(status) {
@@ -835,6 +996,8 @@ async function executeSignal(alert) {
         signalId: alert.id,
         candleHigh: alert.high,
         candleLow: alert.low,
+        entryPrice: alert.entryPrice,
+        stopLossPrice: alert.stopLossPrice,
         quoteVolume: alert.quoteVolume,
         takerBuyQuoteVolume: alert.takerBuyQuoteVolume
       })
@@ -1090,6 +1253,7 @@ elements.clearButton.addEventListener("click", () => {
   if (alerts.length === 0) return;
   alerts = [];
   seenCandles.clear();
+  jMinuteCandidates.clear();
   saveAlerts();
   renderAlerts();
   elements.lastUpdated.textContent = markets.length ? "Watching for new alerts" : "Waiting for market data";
@@ -1124,6 +1288,16 @@ elements.settingsForm.addEventListener("submit", async (event) => {
   if (!Number.isInteger(maxOpenTrades) || maxOpenTrades < 1 || maxOpenTrades > MAX_OPEN_TRADES) {
     elements.maxOpenTradesInput.setCustomValidity("Enter a whole number between 1 and 100.");
     elements.maxOpenTradesInput.reportValidity();
+    return;
+  }
+
+  const changeMin = Number(elements.changeMinInput.value);
+  const changeMax = Number(elements.changeMaxInput.value);
+  if (!Number.isFinite(changeMin) || !Number.isFinite(changeMax) ||
+      changeMin < -100 || changeMin > 100 || changeMax < -100 || changeMax > 100 ||
+      changeMin >= changeMax) {
+    elements.changeMinInput.setCustomValidity("Set a 24-hour change range from -100% to 100%, with the minimum below the maximum.");
+    elements.changeMinInput.reportValidity();
     return;
   }
 
@@ -1200,6 +1374,8 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     threshold,
     alertLimit,
     maxOpenTrades,
+    changeMin,
+    changeMax,
     notifications,
     tradeMode,
     strategy: elements.strategyInput.value,
@@ -1210,6 +1386,8 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     stopLossRoi: stopLossRoi ?? "",
     tradingEnabled: false
   };
+  settingsRevision += 1;
+  jMinuteCandidates.clear();
   if (saveSettings()) {
     alerts = alerts.slice(0, settings.alertLimit);
     saveAlerts();
@@ -1295,6 +1473,14 @@ elements.maxOpenTradesInput.addEventListener("input", () => {
   elements.maxOpenTradesInput.setCustomValidity("");
   elements.settingsFeedback.textContent = "";
 });
+
+for (const input of [elements.changeMinInput, elements.changeMaxInput]) {
+  input.addEventListener("input", () => {
+    elements.changeMinInput.setCustomValidity("");
+    elements.changeMaxInput.setCustomValidity("");
+    elements.settingsFeedback.textContent = "";
+  });
+}
 
 elements.notificationsInput.addEventListener("change", () => {
   elements.settingsFeedback.textContent = "";
